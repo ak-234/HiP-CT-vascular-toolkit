@@ -1,4 +1,4 @@
-"""Smoke tests for manual_prune (run: python -m coronary_sdf._test_manual_prune).
+"""Smoke tests for manual_prune (run: python tests/_test_manual_prune.py).
 
 Covers the display-free path: scalar colouring, apply_manual_prune's new
 removed_seg_ids field, the Amira writer round-trip, and the removal log writers.

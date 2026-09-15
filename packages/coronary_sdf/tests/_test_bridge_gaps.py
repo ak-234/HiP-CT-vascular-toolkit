@@ -1,5 +1,5 @@
 """Smoke tests for smoothing.bridge_centerline_gaps
-(run: python -m coronary_sdf._test_bridge_gaps).
+(run: python tests/_test_bridge_gaps.py).
 
 Covers a mid-segment point-less gap and a start gap (i=0), checking that interior
 points are inserted at ~target spacing, all original points/endpoints survive, the

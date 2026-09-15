@@ -1,6 +1,6 @@
 """Synthetic-geometry tests for the WSS arc-sweep core (file-IO-free).
 
-Run: ``python -m coronary_sdf._test_wss_postprocess``
+Run: ``python tests/_test_wss_postprocess.py``
 
 Builds a straight cylinder centreline (along +z) plus a dense wall point cloud
 whose WSS varies as ``base + amp*cos(phi - phi0)`` around the circumference, then

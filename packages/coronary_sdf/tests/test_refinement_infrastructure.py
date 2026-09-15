@@ -28,8 +28,12 @@ from coronary_sdf.implicit_field import (
 from coronary_sdf.mesh_validation import validate_mesh
 from coronary_sdf.profiles import ProfileUnavailable, candidate_cfd_config, resolve_profile
 from coronary_sdf.synthetic_cases import synthetic_suite
-from coronary_sdf.test_implicit_field import _capsules
 from coronary_sdf.vtk_htg_mesher import mesh_vtk_hyper_tree_grid
+
+# Sibling test module, not part of the package: under the old flat layout the
+# repo root *was* `coronary_sdf`, so this read `coronary_sdf.test_implicit_field`.
+# Tests now live outside the package, and pytest puts this directory on sys.path.
+from test_implicit_field import _capsules
 
 
 def test_runtime_configuration_is_nested_and_does_not_mutate_defaults():

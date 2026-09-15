@@ -13,7 +13,10 @@ authors = [{ name = "Skeleton_analysis contributors" }]
 keywords = ["vasculature", "skeleton", "amira", "spatial-graph", "strahler", "topology", "HiP-CT"]
 
 dependencies = [
-    "numpy>=1.21",
+    # Capped for the same reason as coronary_sdf: these packages share an
+    # environment with hipct_seg_debug, which pins numpy==1.26.4 because
+    # numpy 2.x breaks numba. An uncapped install here would undo that pin.
+    "numpy>=1.21,<2",
     "scipy>=1.7",
     "networkx>=2.6",
     "pandas>=1.3",

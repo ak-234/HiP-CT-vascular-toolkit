@@ -1,4 +1,4 @@
-"""Smoke tests for epicardial_annotation (run: python -m coronary_sdf._test_epicardial_annotation).
+"""Smoke tests for epicardial_annotation (run: python tests/_test_epicardial_annotation.py).
 
 Covers the parts that need no display and no heavy SDF pipeline:
   1. Amira XML writer round-trips through parse_amira.parse_xml.

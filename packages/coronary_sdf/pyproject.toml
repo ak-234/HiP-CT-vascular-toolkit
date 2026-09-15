@@ -10,7 +10,12 @@ readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "Akash Sivananthan", email = "akashsivananthan@gmail.com" }]
 dependencies = [
-    "numpy>=1.24",
+    # Upper bound is load-bearing, not caution. These three packages share one
+    # environment: hipct_seg_debug pins numpy==1.26.4 because numpy 2.x breaks
+    # numba (its RLE decoder), and numba itself requires <2.1. Without this cap
+    # a plain `pip install -e packages/coronary_sdf` silently pulls numpy 2.x
+    # and breaks the other two.
+    "numpy>=1.24,<2",
     "scipy>=1.10",
     "pyvista>=0.43",
     "vtk>=9.2",
