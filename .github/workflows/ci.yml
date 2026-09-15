@@ -46,6 +46,9 @@ jobs:
       - name: Test skeleton_analysis
         run: python -m pytest packages/skeleton_analysis/tests -q
 
+      - name: Test migration tooling
+        run: python -m pytest tools/tests -q
+
       - name: Test coronary_sdf
         run: python -m pytest packages/coronary_sdf/tests -q
 
