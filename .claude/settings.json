@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//f//HiP-CT-vascular-toolkit/**)",
+      "Read(//c/Users/Akash/**)",
+
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git ls-files:*)",
+
+      "Bash(python -m pytest packages/skeleton_analysis/tests:*)",
+      "Bash(python -m pytest packages/coronary_sdf/tests:*)",
+      "Bash(python -m pytest packages/hipct_seg_debug/tests:*)",
+      "Bash(timeout 1800 python -m pytest packages/hipct_seg_debug/tests:*)",
+
+      "Bash(python -m ruff check:*)",
+      "Bash(python -m compileall -q packages/:*)",
+      "Bash(python -m build packages/:*)",
+      "Bash(python -m twine check:*)",
+
+      "Bash(python tools/sync_from_legacy.py:*)",
+      "Bash(python tools/sync_from_legacy.py --dry-run:*)",
+
+      "Bash(python -m hipct_seg_debug --help)",
+      "Bash(python -m hipct_seg_debug.edit --help)",
+      "Bash(python -m coronary_sdf --help)",
+      "Bash(timeout 1800 python -m hipct_seg_debug --selftest)",
+      "Bash(QT_QPA_PLATFORM=offscreen python -m hipct_seg_debug --selftest)"
+    ]
+  }
+}

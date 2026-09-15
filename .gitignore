@@ -106,3 +106,8 @@ IMPLEMENTATION_LOG.html
 !packages/skeleton_analysis/tests/data/Test.am
 # Checked-in documentation, not a run product.
 !packages/coronary_sdf/docs/dashboard.html
+# Shared agent permissions travel with the repo; everything else under
+# .claude/ (local overrides, session state) stays out.
+!.claude/
+.claude/*
+!.claude/settings.json
