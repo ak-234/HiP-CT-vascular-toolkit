@@ -27,6 +27,20 @@ htmlcov/
 .DS_Store
 Thumbs.db
 .claude/
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+GEMINI.md
+.codex/
+.cursor/
+.cursorrules
+.aider*
+.windsurf/
+.windsurfrules
+.clinerules
+.roo/
+.mcp.json
+.github/copilot-instructions.md
 *.asv
 
 # ── Generated output trees ───────────────────────────────────────────────────
@@ -106,8 +120,3 @@ IMPLEMENTATION_LOG.html
 !packages/skeleton_analysis/tests/data/Test.am
 # Checked-in documentation, not a run product.
 !packages/coronary_sdf/docs/dashboard.html
-# Shared agent permissions travel with the repo; everything else under
-# .claude/ (local overrides, session state) stays out.
-!.claude/
-.claude/*
-!.claude/settings.json
