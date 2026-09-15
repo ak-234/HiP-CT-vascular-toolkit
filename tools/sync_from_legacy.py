@@ -174,6 +174,11 @@ class Plan:
 
 def _skip(path: Path, root: Path) -> bool:
     rel = path.relative_to(root)
+    # Checkout instructions describe the retired repository, not the imported
+    # package. In particular its retirement notice must not override the active
+    # monorepo's instructions. Nested package guidance can still travel with code.
+    if len(rel.parts) == 1 and rel.name.upper() in {"CLAUDE.MD", "AGENTS.MD"}:
+        return True
     if any(part in SKIP_DIRS for part in rel.parts):
         return True
     if path.suffix.lower() in SKIP_SUFFIXES:

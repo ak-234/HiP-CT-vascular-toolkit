@@ -100,7 +100,12 @@ those scores nor reduced roughness alone qualify a method as anatomically correc
 Known-centre synthetic vessels, untouched controls, junctions, foreground
 containment, different sample spacings, and the final surface all need checking.
 
-The executable synthetic comparison and figures for LADAF-2021-17 are under
-`runs/radius_debug_2021_17/`; the real-data comparisons are under
-`runs/centreline_benchmark_2021_17/` and
-`runs/centreline_benchmark_coherent_2021_17/`.
+The synthetic comparison requires no dataset or test-package imports:
+
+```
+python -m hipct_seg_debug.edit.centreline_synthetic_benchmark --out runs/synthetic/results.json
+```
+
+See [the LADAF-2021-17 qualification report](CENTRELINE_QUALIFICATION_2021_17.md)
+for completed comparisons and the remaining acceptance gaps. Generated graphs,
+segmentation data and per-region outputs are local artifacts, excluded from Git.
