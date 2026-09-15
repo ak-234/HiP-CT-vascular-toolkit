@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "scan": "LADAF-2024-28",
+  "coordinate_order": "raw z,y,x; world x,y,z in micrometres",
+  "ground_truth_policy": "Candidate and hard-negative roles are search hints only. Populate adjudication.paper_labels after blinded raw-image review.",
+  "regions": [
+    {
+      "id": "T1-A",
+      "type": 1,
+      "role": "candidate",
+      "source": {"node": 575, "world_um": [46334.5, 51975.8, 115580.5]},
+      "target": {"node": 583, "world_um": [46334.5, 51711.8, 116108.3]},
+      "raw_endpoints_zyx": [[3503, 1576, 1405], [3519, 1568, 1405]],
+      "raw_roi_zyx": [[3488, 1552, 1389], [3535, 1591, 1420]],
+      "notes": "Geometry-plausible candidate; segmentation core fraction 0.400, longest gap 6 voxels.",
+      "adjudication": {"status": "pending", "reviewer": null, "correct_type": null, "correct_target": null, "paper_labels": {}}
+    },
+    {
+      "id": "T1-B",
+      "type": 1,
+      "role": "candidate",
+      "source": {"node": 740, "world_um": [14532.1, 76520.3, 125345.5]},
+      "target": {"node": 751, "world_um": [14598.1, 76520.3, 125741.4]},
+      "raw_endpoints_zyx": [[3799, 2320, 441], [3811, 2320, 443]],
+      "raw_roi_zyx": [[3784, 2303, 425], [3827, 2335, 458]],
+      "notes": "Geometry-plausible candidate; segmentation core fraction 0.500, longest gap 2 voxels.",
+      "adjudication": {"status": "pending", "reviewer": null, "correct_type": null, "correct_target": null, "paper_labels": {}}
+    },
+    {
+      "id": "T1-N",
+      "type": 1,
+      "role": "hard-negative",
+      "source": {"node": 1116, "world_um": [78268.8, 47885.0, 143424.0]},
+      "target": {"node": 1124, "world_um": [78730.6, 48412.8, 143622.0]},
+      "raw_endpoints_zyx": [[4347, 1452, 2373], [4353, 1468, 2387]],
+      "raw_roi_zyx": [[4332, 1436, 2357], [4369, 1483, 2402]],
+      "notes": "Geometric hard control: target endpoint faces away.",
+      "adjudication": {"status": "pending", "reviewer": null, "correct_type": null, "correct_target": null, "paper_labels": {}}
+    },
+    {
+      "id": "T2-A",
+      "type": 2,
+      "role": "candidate",
+      "source": {"node": 977, "world_um": [45410.7, 57650.0, 139663.2]},
+      "target": {"node": 983, "world_um": [45674.7, 56660.3, 139795.1]},
+      "raw_endpoints_zyx": [[4233, 1748, 1377], [4237, 1718, 1385]],
+      "raw_roi_zyx": [[4218, 1702, 1361], [4253, 1763, 1400]],
+      "notes": "Geometry-plausible candidate; segmentation core fraction 0.304, longest gap 15 voxels.",
+      "adjudication": {"status": "pending", "reviewer": null, "correct_type": null, "correct_target": null, "paper_labels": {}}
+    },
+    {
+      "id": "T2-B",
+      "type": 2,
+      "role": "candidate",
+      "source": {"node": 328, "world_um": [35381.8, 80809.0, 100603.0]},
+      "target": {"node": 341, "world_um": [35711.7, 80347.2, 101130.8]},
+      "raw_endpoints_zyx": [[3049, 2450, 1073], [3065, 2436, 1083]],
+      "raw_roi_zyx": [[3034, 2420, 1057], [3081, 2465, 1098]],
+      "notes": "Geometry-plausible candidate with weak segmented support; core fraction 0.062, longest gap 15 voxels.",
+      "adjudication": {"status": "pending", "reviewer": null, "correct_type": null, "correct_target": null, "paper_labels": {}}
+    },
+    {
+      "id": "T2-N",
+      "type": 2,
+      "role": "hard-negative",
+      "source": {"node": 1171, "world_um": [91398.8, 74079.1, 146393.1]},
+      "target": {"node": 1174, "world_um": [91332.8, 74474.9, 146723.0]},
+      "raw_endpoints_zyx": [[4437, 2246, 2771], [4447, 2258, 2769]],
+      "raw_roi_zyx": [[4422, 2230, 2753], [4463, 2273, 2786]],
+      "notes": "Geometric hard control: target endpoint faces away; same source has a plausible Type 3 target.",
+      "adjudication": {"status": "pending", "reviewer": null, "correct_type": null, "correct_target": null, "paper_labels": {}}
+    },
+    {
+      "id": "T3-A",
+      "type": 3,
+      "role": "candidate",
+      "source": {"node": 1171, "world_um": [91398.8, 74079.1, 146393.1]},
+      "target": {"segment": 1150, "world_um": [91398.8, 74540.9, 146921.0]},
+      "raw_endpoints_zyx": [[4437, 2246, 2771], [4453, 2260, 2771]],
+      "raw_roi_zyx": [[4422, 2230, 2755], [4469, 2275, 2788]],
+      "notes": "Geometry-plausible endpoint-to-interior candidate; core fraction 0.286, longest gap 10 voxels.",
+      "adjudication": {"status": "pending", "reviewer": null, "correct_type": null, "correct_target": null, "paper_labels": {}}
+    },
+    {
+      "id": "T3-B",
+      "type": 3,
+      "role": "candidate",
+      "source": {"node": 576, "world_um": [71802.7, 26177.6, 115646.5]},
+      "target": {"segment": 587, "world_um": [72264.6, 26243.5, 116108.3]},
+      "raw_endpoints_zyx": [[3505, 794, 2177], [3519, 796, 2191]],
+      "raw_roi_zyx": [[3490, 778, 2161], [3535, 811, 2206]],
+      "notes": "Geometry-plausible endpoint-to-interior candidate with no segmented core and an 11-voxel gap.",
+      "adjudication": {"status": "pending", "reviewer": null, "correct_type": null, "correct_target": null, "paper_labels": {}}
+    },
+    {
+      "id": "T3-N",
+      "type": 3,
+      "role": "hard-negative",
+      "source": {"node": 621, "world_um": [58078.9, 30664.2, 117691.8]},
+      "target": {"segment": 569, "world_um": [57815.0, 29740.5, 116438.2]},
+      "raw_endpoints_zyx": [[3567, 930, 1761], [3529, 902, 1753]],
+      "raw_roi_zyx": [[3514, 886, 1737], [3583, 945, 1776]],
+      "notes": "Geometric hard control: outside the direction cone and no accepted source-target proposal.",
+      "adjudication": {"status": "pending", "reviewer": null, "correct_type": null, "correct_target": null, "paper_labels": {}}
+    }
+  ]
+}

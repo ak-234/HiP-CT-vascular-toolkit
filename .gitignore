@@ -1,0 +1,108 @@
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+.venv/
+venv/
+env/
+.conda-cfc/
+
+# ── Caches / tooling ─────────────────────────────────────────────────────────
+.pytest_cache/
+.pytest_*/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+.benchmark_cache/
+
+# ── Editors / OS / agents ────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.claude/
+*.asv
+
+# ── Generated output trees ───────────────────────────────────────────────────
+# These are run products. They are what made the pre-monorepo history
+# unpublishable (a single tracked log reached 2.98 GB), so they are excluded by
+# directory name rather than only by extension.
+logs/
+cache/
+runs/
+models/
+out/
+output_*/
+analysis_out/
+benchmark_out/
+benchmark_smoke/
+benchmark_[0-9]*/
+benchmark_cgal_*/
+benchmark_vtk_*/
+ablation_smoke/
+mesh_sensitivity_output*/
+pipeline_test_out/
+coronary_sdf_out/
+dpc_review_regions/
+roi_cases/
+test_data/
+heart_video_samples/
+.cfx_extract*/
+.simpleware_*/
+BioMedEng*/
+LADAF_*
+
+# ── Data and derived artifacts ───────────────────────────────────────────────
+# Imaging and mesh data never belongs in this repo; point the tools at it with
+# the environment variables documented in the README.
+*.am
+*.am.xml
+*.stl
+*.ply
+*.obj
+*.vtk
+*.vtp
+*.vtu
+*.vtm
+*.msh
+*.mha
+*.nii
+*.nii.gz
+*.raw
+*.ccl
+*.tif
+*.tiff
+*.npy
+*.npz
+*.h5
+*.mat
+*.res
+*.def
+*.sip
+*.cse
+*.cfx
+*.pre
+*.chm
+*.pptx
+*.gif
+*.log
+*.bak
+ordered.am
+IMPLEMENTATION_LOG.html
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+.env
+*.pem
+*.key
+
+# ── Deliberate exceptions ────────────────────────────────────────────────────
+# Test fixture: skeleton_analysis/tests/conftest.py needs this file to run.
+!packages/skeleton_analysis/tests/data/Test.am
+# Checked-in documentation, not a run product.
+!packages/coronary_sdf/docs/dashboard.html

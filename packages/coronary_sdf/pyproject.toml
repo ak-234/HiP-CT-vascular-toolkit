@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coronary-sdf"
+dynamic = ["version"]
+description = "Coronary lumen surface reconstruction from Amira SpatialGraphs"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "Akash Sivananthan", email = "akashsivananthan@gmail.com" }]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pyvista>=0.43",
+    "vtk>=9.2",
+    "meshlib>=3.0",
+    "networkx>=3.0",
+]
+
+[project.optional-dependencies]
+benchmark = ["psutil>=5.9"]
+repair = ["pymeshfix>=0.17"]
+poisson = ["open3d>=0.18"]
+plot = ["matplotlib>=3.7"]
+speed = ["numba>=0.58"]
+test = [
+    "pytest>=8",
+    "tifffile>=2023.4",
+]
+all = [
+    "psutil>=5.9",
+    "pymeshfix>=0.17",
+    "open3d>=0.18",
+    "matplotlib>=3.7",
+    "numba>=0.58",
+    "pytest>=8",
+    "tifffile>=2023.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/ak-234/HiP-CT-vascular-toolkit"
+Issues = "https://github.com/ak-234/HiP-CT-vascular-toolkit/issues"
+
+[project.scripts]
+coronary-sdf = "coronary_sdf.__main__:main"
+coronary-sdf-benchmark = "coronary_sdf.benchmark:main"
+
+[tool.setuptools]
+include-package-data = false
+
+# src layout: only the package ships. Tests, probes and research scripts live
+# beside it in the repo and stay out of the wheel.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "coronary_sdf.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
+
+# Matches hipct_seg_debug's settings. NOTE: this package predates linting and
+# still reports ~800 violations under these rules, so CI does not yet gate on it
+# -- see .github/workflows/ci.yml. Treat this as the target to clean up towards,
+# not a passing baseline.
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]

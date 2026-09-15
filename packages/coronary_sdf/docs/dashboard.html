@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>coronary_sdf · how it works</title>
+<style>
+  /* ─────────────────────────  TOKENS  ───────────────────────── */
+  :root {
+    /* neutrals — blue-biased slate (a chosen grey, not a default) */
+    --bg:        #eef2f4;
+    --bg-elev:   #ffffff;
+    --bg-elev2:  #f5f8f9;
+    --border:    #d3dde3;
+    --border-strong: #b9c7d0;
+    --text:      #16232c;
+    --text-dim:  #4d5f6b;
+    --text-faint:#7b8b96;
+
+    /* signed-distance-field colour language */
+    --field-neg: #2563eb;   /* inside the lumen  (negative distance) */
+    --accent:    #0c8f83;   /* the surface / signal (zero level-set) */
+    --accent-ink:#0c8f83;
+    --accent-2:  #a9701a;   /* Strahler / config warmth */
+    --field-pos: #d6434a;   /* outside / carve / bridge — semantic */
+
+    --accent-wash: #0c8f8316;
+    --neg-wash:    #2563eb14;
+    --pos-wash:    #d6434a14;
+
+    --shadow: 0 1px 2px rgba(20,35,44,.06), 0 8px 24px rgba(20,35,44,.06);
+    --radius: 10px;
+    --radius-sm: 7px;
+
+    --font-display: "Segoe UI Variable Display","Segoe UI",system-ui,-apple-system,Roboto,sans-serif;
+    --font-body:    "Segoe UI",system-ui,-apple-system,Roboto,sans-serif;
+    --font-mono:    "Cascadia Code","Cascadia Mono",Consolas,ui-monospace,"SF Mono",Menlo,monospace;
+
+    --maxw: 1120px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:        #0d1216;
+      --bg-elev:   #141c22;
+      --bg-elev2:  #1a242c;
+      --border:    #26333d;
+      --border-strong: #354653;
+      --text:      #dce5eb;
+      --text-dim:  #93a5b2;
+      --text-faint:#63757f;
+
+      --field-neg: #57a5ff;
+      --accent:    #33d3bd;
+      --accent-ink:#33d3bd;
+      --accent-2:  #e6b24a;
+      --field-pos: #ef5a63;
+
+      --accent-wash: #33d3bd1c;
+      --neg-wash:    #57a5ff16;
+      --pos-wash:    #ef5a6318;
+
+      --shadow: 0 1px 2px rgba(0,0,0,.35), 0 10px 30px rgba(0,0,0,.4);
+    }
+  }
+
+  /* explicit toggle overrides the OS preference in both directions */
+  :root[data-theme="light"] {
+    --bg:#eef2f4; --bg-elev:#ffffff; --bg-elev2:#f5f8f9; --border:#d3dde3; --border-strong:#b9c7d0;
+    --text:#16232c; --text-dim:#4d5f6b; --text-faint:#7b8b96;
+    --field-neg:#2563eb; --accent:#0c8f83; --accent-ink:#0c8f83; --accent-2:#a9701a; --field-pos:#d6434a;
+    --accent-wash:#0c8f8316; --neg-wash:#2563eb14; --pos-wash:#d6434a14;
+    --shadow:0 1px 2px rgba(20,35,44,.06),0 8px 24px rgba(20,35,44,.06);
+  }
+  :root[data-theme="dark"] {
+    --bg:#0d1216; --bg-elev:#141c22; --bg-elev2:#1a242c; --border:#26333d; --border-strong:#354653;
+    --text:#dce5eb; --text-dim:#93a5b2; --text-faint:#63757f;
+    --field-neg:#57a5ff; --accent:#33d3bd; --accent-ink:#33d3bd; --accent-2:#e6b24a; --field-pos:#ef5a63;
+    --accent-wash:#33d3bd1c; --neg-wash:#57a5ff16; --pos-wash:#ef5a6318;
+    --shadow:0 1px 2px rgba(0,0,0,.35),0 10px 30px rgba(0,0,0,.4);
+  }
+
+  /* ─────────────────────────  RESET  ───────────────────────── */
+  *,*::before,*::after { box-sizing:border-box; }
+  html { scroll-behavior:smooth; scroll-padding-top:78px; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:var(--font-body); font-size:15.5px; line-height:1.65;
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  }
+  a { color:var(--accent-ink); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:3px; }
+  code, .mono { font-family:var(--font-mono); }
+  h1,h2,h3 { text-wrap:balance; line-height:1.15; margin:0; }
+
+  /* ─────────────────────────  HEADER / NAV  ───────────────────────── */
+  header.top {
+    position:sticky; top:0; z-index:50;
+    background:color-mix(in srgb, var(--bg) 86%, transparent);
+    backdrop-filter:saturate(1.4) blur(10px);
+    border-bottom:1px solid var(--border);
+  }
+  .top-inner {
+    max-width:var(--maxw); margin:0 auto; padding:11px 24px;
+    display:flex; align-items:center; gap:20px;
+  }
+  .wordmark { display:flex; align-items:baseline; gap:9px; font-family:var(--font-mono); font-weight:600; }
+  .wordmark .dot { width:9px; height:9px; border-radius:50%;
+    background:radial-gradient(circle at 30% 30%, var(--accent), var(--field-neg));
+    box-shadow:0 0 0 3px var(--accent-wash); flex:none; align-self:center; }
+  .wordmark .name { font-size:15px; letter-spacing:-.2px; }
+  .wordmark .name b { color:var(--accent-ink); }
+  nav.anchors { margin-left:auto; display:flex; gap:2px; flex-wrap:wrap; }
+  nav.anchors a {
+    font-family:var(--font-mono); font-size:12.5px; color:var(--text-dim);
+    padding:6px 11px; border-radius:6px; transition:color .15s, background .15s;
+  }
+  nav.anchors a:hover { color:var(--text); background:var(--bg-elev2); text-decoration:none; }
+  nav.anchors a.active { color:var(--accent-ink); background:var(--accent-wash); }
+  .theme-btn {
+    font-family:var(--font-mono); font-size:12px; color:var(--text-dim);
+    background:var(--bg-elev); border:1px solid var(--border); border-radius:6px;
+    padding:6px 10px; cursor:pointer; display:flex; align-items:center; gap:6px;
+    transition:border-color .15s, color .15s;
+  }
+  .theme-btn:hover { color:var(--text); border-color:var(--border-strong); }
+  @media (max-width:860px){ nav.anchors{ display:none; } }
+
+  /* ─────────────────────────  LAYOUT  ───────────────────────── */
+  main { max-width:var(--maxw); margin:0 auto; padding:0 24px 96px; }
+  section { padding-top:64px; }
+  .prose { max-width:68ch; }
+  .prose p { margin:0 0 14px; color:var(--text-dim); }
+  .prose p strong { color:var(--text); font-weight:600; }
+
+  .eyebrow {
+    font-family:var(--font-mono); font-size:12px; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--accent-ink); font-weight:600; margin-bottom:12px; display:flex; align-items:center; gap:10px;
+  }
+  .eyebrow::before { content:""; width:22px; height:1px; background:var(--accent); opacity:.7; }
+  h2.sec { font-family:var(--font-display); font-size:clamp(24px,3.4vw,33px); font-weight:650; letter-spacing:-.5px; }
+  .sec-lead { margin:12px 0 30px; color:var(--text-dim); max-width:66ch; }
+
+  /* ─────────────────────────  HERO  ───────────────────────── */
+  .hero { padding-top:56px; }
+  .hero-grid { display:grid; grid-template-columns:1.15fr .85fr; gap:42px; align-items:center; }
+  @media (max-width:820px){ .hero-grid{ grid-template-columns:1fr; gap:30px; } }
+  .hero h1 {
+    font-family:var(--font-display); font-weight:680;
+    font-size:clamp(32px,5.6vw,52px); letter-spacing:-1.4px; margin-bottom:8px;
+  }
+  .hero h1 .accent { color:var(--accent-ink); }
+  .hero .kicker { font-family:var(--font-mono); font-size:13px; color:var(--text-faint); letter-spacing:.02em; margin-bottom:22px; }
+  .hero-lead { font-size:18px; line-height:1.6; color:var(--text-dim); max-width:56ch; }
+  .hero-lead b { color:var(--text); font-weight:600; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:26px; }
+  .chip {
+    font-family:var(--font-mono); font-size:12px; color:var(--text-dim);
+    background:var(--bg-elev); border:1px solid var(--border); border-radius:999px; padding:6px 13px;
+    display:flex; align-items:center; gap:7px;
+  }
+  .chip b { color:var(--text); font-weight:600; }
+  .chip .sw { width:8px; height:8px; border-radius:2px; flex:none; }
+
+  .hero-figure {
+    background:var(--bg-elev); border:1px solid var(--border); border-radius:14px;
+    padding:22px; box-shadow:var(--shadow);
+  }
+  .hero-figure figcaption { font-family:var(--font-mono); font-size:11.5px; color:var(--text-faint);
+    text-align:center; margin-top:12px; letter-spacing:.02em; }
+
+  /* ─────────────────────────  CARDS  ───────────────────────── */
+  .card {
+    background:var(--bg-elev); border:1px solid var(--border); border-radius:var(--radius);
+    padding:22px; box-shadow:var(--shadow);
+  }
+
+  /* ─────────────────────────  PIPELINE  ───────────────────────── */
+  .phase { margin-bottom:16px; }
+  .phase-head {
+    display:flex; align-items:center; gap:12px; margin:0 2px 12px;
+  }
+  .phase-head .pl {
+    font-family:var(--font-mono); font-size:11px; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--text-faint);
+  }
+  .phase-head .bar { height:1px; flex:1; background:var(--border); }
+  .phase-head .pn { font-family:var(--font-mono); font-size:11px; color:var(--accent-ink); font-weight:600; }
+  .stage-row { display:grid; grid-template-columns:repeat(auto-fill,minmax(232px,1fr)); gap:12px; }
+  .stage {
+    position:relative; background:var(--bg-elev); border:1px solid var(--border);
+    border-radius:var(--radius-sm); padding:14px 15px 15px; overflow:hidden;
+    transition:transform .16s ease, border-color .16s ease, box-shadow .16s ease;
+  }
+  .stage::before {
+    content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
+    background:var(--edge, var(--accent)); opacity:.85;
+  }
+  .stage:hover { transform:translateY(-3px); border-color:var(--border-strong); box-shadow:var(--shadow); }
+  .stage .num { font-family:var(--font-mono); font-size:11px; color:var(--text-faint); }
+  .stage h4 { margin:3px 0 5px; font-size:15px; font-weight:640; letter-spacing:-.2px; }
+  .stage .fn { font-family:var(--font-mono); font-size:11.5px; color:var(--accent-ink);
+    display:block; margin-bottom:7px; word-break:break-word; }
+  .stage p { margin:0; font-size:13px; color:var(--text-dim); line-height:1.5; }
+  @media (prefers-reduced-motion: reduce){ .stage:hover{ transform:none; } }
+
+  /* ─────────────────────────  LOGIC  ───────────────────────── */
+  .logic-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:18px; }
+  @media (max-width:820px){ .logic-grid{ grid-template-columns:1fr; } }
+  .logic {
+    display:grid; grid-template-columns:150px 1fr; gap:18px; align-items:start;
+    background:var(--bg-elev); border:1px solid var(--border); border-radius:var(--radius);
+    padding:20px; box-shadow:var(--shadow);
+  }
+  @media (max-width:520px){ .logic{ grid-template-columns:1fr; } }
+  .logic figure { margin:0; }
+  .logic svg { width:100%; height:auto; display:block;
+    background:var(--bg-elev2); border:1px solid var(--border); border-radius:8px; }
+  .logic .body h3 { font-size:16.5px; font-weight:650; letter-spacing:-.3px; margin-bottom:8px; }
+  .logic .body p { margin:0 0 10px; font-size:13.5px; color:var(--text-dim); line-height:1.55; }
+  .logic .tag {
+    font-family:var(--font-mono); font-size:11px; color:var(--text-dim);
+    background:var(--bg-elev2); border:1px solid var(--border); border-radius:5px;
+    padding:2px 7px; display:inline-block;
+  }
+  .logic .where { font-family:var(--font-mono); font-size:11.5px; color:var(--text-faint); margin-top:4px; }
+  .logic .where b { color:var(--accent-ink); font-weight:600; }
+  .kbd { font-family:var(--font-mono); font-size:.86em; background:var(--bg-elev2);
+    border:1px solid var(--border); border-radius:4px; padding:1px 5px; color:var(--text); }
+
+  .formula {
+    font-family:var(--font-mono); font-size:14px; color:var(--text);
+    background:var(--bg-elev2); border:1px solid var(--border); border-left:3px solid var(--accent);
+    border-radius:6px; padding:12px 14px; margin:14px 0; overflow-x:auto;
+  }
+
+  /* ─────────────────────────  MODULE MAP  ───────────────────────── */
+  .mod-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(272px,1fr)); gap:16px; }
+  .mod-group .gh {
+    font-family:var(--font-mono); font-size:11px; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--text-faint); margin:0 0 12px; display:flex; align-items:center; gap:9px;
+  }
+  .mod-group .gh .gc { width:9px; height:9px; border-radius:2px; flex:none; }
+  .mod {
+    background:var(--bg-elev); border:1px solid var(--border); border-radius:var(--radius-sm);
+    padding:14px 15px; margin-bottom:12px;
+  }
+  .mod .mn { font-family:var(--font-mono); font-size:13.5px; font-weight:600; color:var(--text); }
+  .mod .md { font-size:12.5px; color:var(--text-dim); margin:5px 0 9px; line-height:1.5; }
+  .mod .fns { display:flex; flex-wrap:wrap; gap:5px; }
+  .mod .fns span { font-family:var(--font-mono); font-size:10.5px; color:var(--text-dim);
+    background:var(--bg-elev2); border:1px solid var(--border); border-radius:4px; padding:1px 6px; }
+  .mod.core { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent-wash); }
+  .mod.core .mn::after { content:"core"; font-family:var(--font-mono); font-size:9.5px;
+    text-transform:uppercase; letter-spacing:.08em; color:var(--accent-ink); margin-left:8px;
+    background:var(--accent-wash); border-radius:4px; padding:1px 6px; vertical-align:middle; }
+
+  /* ─────────────────────────  CONFIG TABLE  ───────────────────────── */
+  .cfg-tools { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
+  .search {
+    display:flex; align-items:center; gap:8px; background:var(--bg-elev);
+    border:1px solid var(--border); border-radius:8px; padding:8px 12px; flex:1; min-width:220px; max-width:420px;
+  }
+  .search input { border:0; background:transparent; color:var(--text); font-family:var(--font-mono);
+    font-size:13px; width:100%; outline:none; }
+  .search svg { flex:none; color:var(--text-faint); }
+  .cfg-count { font-family:var(--font-mono); font-size:12px; color:var(--text-faint); }
+  .table-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:var(--radius); }
+  table { border-collapse:collapse; width:100%; min-width:640px; background:var(--bg-elev); }
+  thead th {
+    text-align:left; font-family:var(--font-mono); font-size:11px; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--text-faint); font-weight:600; padding:12px 16px; border-bottom:1px solid var(--border);
+    position:sticky; top:0; background:var(--bg-elev);
+  }
+  tbody td { padding:11px 16px; border-bottom:1px solid var(--border); vertical-align:top; font-size:13.5px; }
+  tbody tr:last-child td { border-bottom:0; }
+  tbody tr:hover { background:var(--bg-elev2); }
+  td.knob { font-family:var(--font-mono); font-size:12.5px; color:var(--accent-ink); white-space:nowrap; }
+  td.dflt { font-family:var(--font-mono); font-size:12.5px; color:var(--accent-2); white-space:nowrap;
+    font-variant-numeric:tabular-nums; }
+  td.stage-c { font-family:var(--font-mono); font-size:11px; color:var(--text-faint); white-space:nowrap; }
+  td.desc { color:var(--text-dim); }
+  .noresult { padding:24px 16px; color:var(--text-faint); font-family:var(--font-mono); font-size:13px; }
+
+  /* ─────────────────────────  TOOLS  ───────────────────────── */
+  .tool-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:16px; }
+  .tool { background:var(--bg-elev); border:1px solid var(--border); border-radius:var(--radius);
+    padding:19px 20px; box-shadow:var(--shadow); display:flex; flex-direction:column; }
+  .tool .tn { font-family:var(--font-mono); font-size:14px; font-weight:600; color:var(--text); margin-bottom:3px; }
+  .tool .tt { font-size:12.5px; color:var(--accent-ink); font-weight:600; margin-bottom:9px; }
+  .tool p { margin:0 0 12px; font-size:13px; color:var(--text-dim); line-height:1.55; }
+  .tool .io { margin-top:auto; display:flex; flex-direction:column; gap:5px; font-family:var(--font-mono); font-size:11px; }
+  .tool .io span { color:var(--text-dim); }
+  .tool .io b { color:var(--text-faint); font-weight:600; display:inline-block; width:44px; }
+
+  /* ─────────────────────────  FOOTER  ───────────────────────── */
+  footer { border-top:1px solid var(--border); margin-top:40px; }
+  .foot-inner { max-width:var(--maxw); margin:0 auto; padding:28px 24px 48px;
+    display:flex; flex-wrap:wrap; gap:18px 40px; align-items:baseline; justify-content:space-between; }
+  .foot-links { display:flex; gap:20px; flex-wrap:wrap; font-family:var(--font-mono); font-size:12.5px; }
+  .foot-note { font-family:var(--font-mono); font-size:11.5px; color:var(--text-faint); }
+
+  .legend { display:flex; gap:16px; flex-wrap:wrap; margin:2px 0 26px; }
+  .legend span { display:flex; align-items:center; gap:7px; font-family:var(--font-mono); font-size:12px; color:var(--text-dim); }
+  .legend .sw { width:12px; height:12px; border-radius:3px; flex:none; }
+
+  /* fade-in on load */
+  @media (prefers-reduced-motion: no-preference) {
+    .fade { opacity:0; transform:translateY(10px); transition:opacity .6s ease, transform .6s ease; }
+    .fade.in { opacity:1; transform:none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="top-inner">
+    <div class="wordmark">
+      <span class="dot" aria-hidden="true"></span>
+      <span class="name">coronary<b>_sdf</b></span>
+    </div>
+    <nav class="anchors" aria-label="Section navigation">
+      <a href="#overview">Overview</a>
+      <a href="#pipeline">Pipeline</a>
+      <a href="#logic">The&nbsp;logic</a>
+      <a href="#modules">Modules</a>
+      <a href="#config">Config</a>
+      <a href="#tools">Tools</a>
+    </nav>
+    <button class="theme-btn" id="themeBtn" type="button" aria-label="Toggle colour theme">
+      <span id="themeIcon">◐</span><span id="themeLabel">Theme</span>
+    </button>
+  </div>
+</header>
+
+<main>
+
+  <!-- ─────────────  HERO  ───────────── -->
+  <section class="hero" id="overview" style="padding-top:52px;">
+    <div class="hero-grid">
+      <div>
+        <p class="kicker">Coronary lumen surface reconstruction · SDF pipeline</p>
+        <h1>From a centerline graph to a <span class="accent">watertight lumen</span>.</h1>
+        <p class="hero-lead">
+          <b>coronary_sdf</b> turns an Amira/Avizo <b>SpatialGraph</b> — vessel centerlines with a
+          radius at every point — into a closed, CFD-ready surface mesh of the artery lumen, using a
+          <b>smooth-minimum capsule signed-distance field</b>. Downstream tools then drive outlet
+          flow boundary conditions and wall-shear-stress analysis.
+        </p>
+        <div class="chips">
+          <span class="chip"><span class="sw" style="background:var(--field-neg)"></span><b>16</b>&nbsp;pipeline stages</span>
+          <span class="chip"><span class="sw" style="background:var(--accent)"></span><b>1</b>&nbsp;implicit field</span>
+          <span class="chip"><span class="sw" style="background:var(--accent-2)"></span>function-oriented</span>
+          <span class="chip"><span class="sw" style="background:var(--field-pos)"></span>watertight&nbsp;output</span>
+        </div>
+      </div>
+      <figure class="hero-figure">
+        <!-- graph → field → mesh -->
+        <svg viewBox="0 0 360 210" role="img" aria-label="A centerline graph becomes a signed-distance field, then a lumen surface mesh.">
+          <!-- panel 1: graph -->
+          <g>
+            <text x="8" y="18" font-family="var(--font-mono)" font-size="9" fill="var(--text-faint)">1 · GRAPH</text>
+            <line x1="20" y1="70" x2="60" y2="52" stroke="var(--text-dim)" stroke-width="2"/>
+            <line x1="60" y1="52" x2="98" y2="40" stroke="var(--text-dim)" stroke-width="2"/>
+            <line x1="60" y1="52" x2="92" y2="86" stroke="var(--text-dim)" stroke-width="2"/>
+            <line x1="20" y1="70" x2="30" y2="112" stroke="var(--text-dim)" stroke-width="2"/>
+            <circle cx="20" cy="70" r="4" fill="var(--accent-2)"/>
+            <circle cx="60" cy="52" r="4" fill="var(--field-pos)"/>
+            <circle cx="98" cy="40" r="3.2" fill="var(--text-faint)"/>
+            <circle cx="92" cy="86" r="3.2" fill="var(--text-faint)"/>
+            <circle cx="30" cy="112" r="3.2" fill="var(--text-faint)"/>
+          </g>
+          <!-- arrow -->
+          <path d="M118 76 h20" stroke="var(--text-faint)" stroke-width="1.5" marker-end="url(#ar)"/>
+          <!-- panel 2: diverging field -->
+          <g transform="translate(150,0)">
+            <text x="0" y="18" font-family="var(--font-mono)" font-size="9" fill="var(--text-faint)">2 · SDF</text>
+            <g transform="translate(46,74)">
+              <circle r="42" fill="var(--pos-wash)"/>
+              <circle r="30" fill="var(--neg-wash)"/>
+              <circle r="30" fill="none" stroke="var(--field-neg)" stroke-width="1" opacity=".5"/>
+              <circle r="21" fill="none" stroke="var(--accent)" stroke-width="2.4"/>
+              <circle r="12" fill="none" stroke="var(--field-neg)" stroke-width="1" opacity=".5"/>
+              <circle r="42" fill="none" stroke="var(--field-pos)" stroke-width="1" opacity=".45"/>
+            </g>
+          </g>
+          <path d="M250 76 h20" stroke="var(--text-faint)" stroke-width="1.5" marker-end="url(#ar)"/>
+          <!-- panel 3: mesh tube -->
+          <g transform="translate(280,0)">
+            <text x="0" y="18" font-family="var(--font-mono)" font-size="9" fill="var(--text-faint)">3 · MESH</text>
+            <path d="M14 44 C40 40 44 66 70 62 M14 60 C40 56 44 82 70 78 M14 92 C40 88 30 116 56 112 M14 108 C40 104 30 132 56 128"
+                  fill="none" stroke="var(--accent)" stroke-width="2" opacity=".9"/>
+            <path d="M14 44 C40 40 44 66 70 62 L70 78 C44 82 40 56 14 60 Z" fill="var(--accent-wash)"/>
+            <path d="M14 92 C40 88 30 116 56 112 L56 128 C30 132 40 104 14 108 Z" fill="var(--accent-wash)"/>
+            <!-- fillet junction -->
+            <path d="M14 60 C40 56 40 88 14 92" fill="none" stroke="var(--accent)" stroke-width="1.4" opacity=".55"/>
+          </g>
+          <defs>
+            <marker id="ar" markerWidth="7" markerHeight="7" refX="5.5" refY="3.5" orient="auto">
+              <path d="M0 0 L6 3.5 L0 7 z" fill="var(--text-faint)"/>
+            </marker>
+          </defs>
+        </svg>
+        <figcaption>graph → smooth-min distance field → zero level-set mesh</figcaption>
+      </figure>
+    </div>
+
+    <div class="prose" style="margin-top:52px;">
+      <p>
+        A coronary tree, after segmentation and skeletonisation, is stored as a graph of
+        <strong>nodes</strong> (branch points, endpoints), <strong>points</strong> (dense centerline
+        samples carrying a local radius), and <strong>segments</strong> (edges tagged with a Strahler
+        order). The core idea of the package is to represent every vessel as a chain of tapered
+        <strong>capsules</strong> and to define the lumen surface implicitly as the zero level-set of a
+        <strong>signed-distance field</strong> built by smooth-min blending those capsules — so
+        bifurcations get anatomically smooth fillets instead of the creases or spherical bulges a plain
+        boolean union would leave, while the mesh stays watertight.
+      </p>
+      <p style="color:var(--text-faint);font-family:var(--font-mono);font-size:13px;">
+        $ python -m coronary_sdf&nbsp;&nbsp;tree.am.xml&nbsp;&nbsp;output_dir/
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────  PIPELINE  ───────────── -->
+  <section id="pipeline">
+    <p class="eyebrow">Pipeline</p>
+    <h2 class="sec">Sixteen stages, one implicit surface</h2>
+    <p class="sec-lead">
+      Run order as orchestrated by <code>pipeline.run_pipeline</code> (graph-wide) and
+      <code>generate_sdf_surface</code> (per connected component). The colour of each stage's rail
+      marks the phase it belongs to.
+    </p>
+    <div class="legend">
+      <span><span class="sw" style="background:var(--accent-2)"></span>Parse &amp; prepare</span>
+      <span><span class="sw" style="background:var(--field-neg)"></span>Geometry</span>
+      <span><span class="sw" style="background:var(--accent)"></span>Field &amp; mesh</span>
+    </div>
+
+    <div class="phase">
+      <div class="phase-head"><span class="pl">Parse &amp; prepare the graph</span><span class="bar"></span><span class="pn">01 – 05</span></div>
+      <div class="stage-row">
+        <article class="stage" style="--edge:var(--accent-2)"><span class="num">01</span><h4>Parse</h4><span class="fn">parse_amira.parse_xml</span><p>Read the SpatialGraph (.am / .am.xml) into nodes, points and segments — coordinates in µm.</p></article>
+        <article class="stage" style="--edge:var(--accent-2)"><span class="num">02</span><h4>Validate</h4><span class="fn">find_degenerate_segments</span><p>Flag collapsed or large-gap centerlines before the expensive work begins.</p></article>
+        <article class="stage" style="--edge:var(--accent-2)"><span class="num">03</span><h4>Topology filter</h4><span class="fn">merge_degree2_segments · merge_split_multifurcations</span><p>Strahler filter, contract pass-through nodes, collapse split multifurcations.</p></article>
+        <article class="stage" style="--edge:var(--accent-2)"><span class="num">04</span><h4>Bridge &amp; densify</h4><span class="fn">bridge_centerline_gaps · densify_sparse_segments</span><p>Fill point-less spans and up-sample sparsely sampled segments.</p></article>
+        <article class="stage" style="--edge:var(--accent-2)"><span class="num">05</span><h4>Split by component</h4><span class="fn">centreline_reconnection.split_by_graph</span><p>One independent sub-problem per connected tree.</p></article>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-head"><span class="pl">Condition the geometry</span><span class="bar"></span><span class="pn">06 – 11</span></div>
+      <div class="stage-row">
+        <article class="stage" style="--edge:var(--field-neg)"><span class="num">06</span><h4>Centerline smoothing</h4><span class="fn">smooth_segment_centerlines · limit_centerline_curvature</span><p>Radius-adaptive B-spline smoothing; straighten bends that would self-intersect.</p></article>
+        <article class="stage" style="--edge:var(--field-neg)"><span class="num">07</span><h4>Radius smoothing</h4><span class="fn">smooth_radius_transitions · prune_*_shrink</span><p>Denoise r(s), blend junction transitions, clamp shrink outliers.</p></article>
+        <article class="stage" style="--edge:var(--field-neg)"><span class="num">08</span><h4>Topology &amp; adjacency</h4><span class="fn">build_adjacency · find_bifurcations · build_directed_topology</span><p>Segment adjacency, bifurcation set, parent / child / sibling masks.</p></article>
+        <article class="stage" style="--edge:var(--field-neg)"><span class="num">09</span><h4>Splines</h4><span class="fn">splines.prepare_segment_spline</span><p>Per-segment cubic spline plus branch tangents at each node.</p></article>
+        <article class="stage" style="--edge:var(--field-neg)"><span class="num">10</span><h4>Carina taper <span style="color:var(--text-faint);font-weight:400">· opt</span></h4><span class="fn">bif_trim.taper_bifurcation_carina</span><p>Cone-taper bif-incident capsule ends for a cleaner carina.</p></article>
+        <article class="stage" style="--edge:var(--field-neg)"><span class="num">11</span><h4>Capsules</h4><span class="fn">capsules.build_capsules</span><p>Sample the splines into tapered capsules and index them in a KD-tree.</p></article>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-head"><span class="pl">Field, mesh &amp; save</span><span class="bar"></span><span class="pn">12 – 16</span></div>
+      <div class="stage-row">
+        <article class="stage" style="--edge:var(--accent)"><span class="num">12</span><h4>Grid &amp; narrow band</h4><span class="fn">compute_grid · build_narrow_band</span><p>Auto voxel size, bounding grid, and a thin shell of voxels near the surface.</p></article>
+        <article class="stage" style="--edge:var(--accent)"><span class="num">13</span><h4>SDF evaluation</h4><span class="fn">sdf_field.evaluate_sdf</span><p>Smooth-min field + anti-bridge carve + flat caps. The heart of the package.</p></article>
+        <article class="stage" style="--edge:var(--accent)"><span class="num">14</span><h4>Iso-surface</h4><span class="fn">mesh_extract.extract_isosurface</span><p>Dual contouring · Poisson · marching cubes at the SDF = 0 level-set.</p></article>
+        <article class="stage" style="--edge:var(--accent)"><span class="num">15</span><h4>Mesh post</h4><span class="fn">radius_constrained_taubin · repair_mesh</span><p>Bridge cut, clean, Taubin smooth (radius-clamped), repair, flat caps.</p></article>
+        <article class="stage" style="--edge:var(--accent)"><span class="num">16</span><h4>Tag &amp; save</h4><span class="fn">region_vtk.emit_region_vtk_for_surface</span><p>Write STL + VTK + per-face region-tagged VTK.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────  THE LOGIC  ───────────── -->
+  <section id="logic">
+    <p class="eyebrow">The logic behind it</p>
+    <h2 class="sec">Why a smooth-min distance field</h2>
+    <p class="sec-lead">
+      Every stage exists to answer one question at each point in space: <em>how far am I from the
+      nearest vessel wall, and am I inside or outside?</em> That scalar is the signed-distance field;
+      the lumen surface is simply where it equals zero. Six ideas make it work.
+    </p>
+
+    <div class="logic-grid">
+
+      <!-- 1 · capsule -->
+      <article class="logic">
+        <figure>
+          <svg viewBox="0 0 150 100" role="img" aria-label="A tapered capsule: a line segment with a large radius at one end and a small radius at the other.">
+            <path d="M35 34 A26 26 0 0 0 35 86 L112 74 A14 14 0 0 0 112 46 Z" fill="var(--accent-wash)" stroke="var(--accent)" stroke-width="2"/>
+            <line x1="35" y1="60" x2="112" y2="60" stroke="var(--text-dim)" stroke-width="1.4" stroke-dasharray="4 3"/>
+            <circle cx="35" cy="60" r="3" fill="var(--field-pos)"/>
+            <circle cx="112" cy="60" r="3" fill="var(--field-pos)"/>
+            <text x="27" y="26" font-family="var(--font-mono)" font-size="9" fill="var(--text-faint)">r₀</text>
+            <text x="118" y="42" font-family="var(--font-mono)" font-size="9" fill="var(--text-faint)">r₁</text>
+          </svg>
+        </figure>
+        <div class="body">
+          <h3>1 · A vessel is a union of capsules</h3>
+          <p>Each segment is split into short spans; every span becomes a <b>capsule</b> — a line
+            segment <span class="kbd">(p₀,p₁)</span> with radii <span class="kbd">(r₀,r₁)</span>, i.e.
+            a cone with hemispherical caps. Distance to a capsule is cheap and exact; the lumen is their
+            union.</p>
+          <p class="where">→ <b>capsules.build_capsules</b></p>
+        </div>
+      </article>
+
+      <!-- 2 · smooth-min -->
+      <article class="logic">
+        <figure>
+          <svg viewBox="0 0 150 100" role="img" aria-label="Hard minimum leaves a sharp crease where two circles meet; smooth minimum joins them with a rounded fillet.">
+            <!-- hard, top: crease -->
+            <g transform="translate(0,4)">
+              <circle cx="52" cy="30" r="18" fill="none" stroke="var(--field-pos)" stroke-width="1.6" opacity=".55"/>
+              <circle cx="80" cy="30" r="18" fill="none" stroke="var(--field-pos)" stroke-width="1.6" opacity=".55"/>
+              <path d="M66 13 L66 47" stroke="var(--field-pos)" stroke-width="1.4" stroke-dasharray="3 2"/>
+              <text x="94" y="26" font-family="var(--font-mono)" font-size="8" fill="var(--field-pos)">crease</text>
+            </g>
+            <!-- smooth, bottom: fillet -->
+            <g transform="translate(0,54)">
+              <path d="M52 12 A18 18 0 1 0 52 48 A22 30 0 0 0 80 48 A18 18 0 1 0 80 12 A22 30 0 0 0 52 12 Z"
+                    fill="var(--accent-wash)" stroke="var(--accent)" stroke-width="2"/>
+              <text x="90" y="34" font-family="var(--font-mono)" font-size="8" fill="var(--accent)">fillet</text>
+            </g>
+          </svg>
+        </figure>
+        <div class="body">
+          <h3>2 · Smooth-min, not a hard union</h3>
+          <p>A plain <span class="kbd">min</span> of distances leaves a sharp crease. A
+            <b>log-sum-exp smooth minimum</b> rounds it into a fillet; <span class="kbd">k</span> is
+            <b>radius-adaptive</b>, so the fillet is a constant fraction of vessel size.</p>
+          <div class="formula">smin = −ln( Σ e<sup>−k·dᵢ</sup> ) / k</div>
+          <p class="where">→ <b>smooth_min_exp · adaptive_smin_k</b></p>
+        </div>
+      </article>
+
+      <!-- 3 · carve -->
+      <article class="logic">
+        <figure>
+          <svg viewBox="0 0 150 100" role="img" aria-label="Two vessels passing close together are stopped from fusing into a false bridge, which is carved away.">
+            <rect x="20" y="18" width="110" height="15" rx="7.5" fill="var(--accent-wash)" stroke="var(--accent)" stroke-width="1.6"/>
+            <rect x="20" y="66" width="110" height="15" rx="7.5" fill="var(--accent-wash)" stroke="var(--accent)" stroke-width="1.6"/>
+            <path d="M70 33 L70 66 M84 33 L84 66" stroke="var(--field-pos)" stroke-width="6" opacity=".18"/>
+            <path d="M62 49 L92 49" stroke="var(--field-pos)" stroke-width="1.6" stroke-dasharray="4 3"/>
+            <text x="95" y="53" font-family="var(--font-mono)" font-size="8" fill="var(--field-pos)">cut</text>
+            <text x="22" y="98" font-family="var(--font-mono)" font-size="8" fill="var(--text-faint)">non-adjacent in the tree</text>
+          </svg>
+        </figure>
+        <div class="body">
+          <h3>3 · Anti-bridge carve</h3>
+          <p>Two vessels can be millimetres apart yet far apart in the tree. A distance-only blend would
+            <b>bridge</b> them. Using the parent / child / sibling masks, the carve pushes the field back
+            out wherever a <b>non-adjacent</b> rival intrudes — only connected segments blend.</p>
+          <p class="where">→ <b>evaluate_sdf · build_directed_topology</b></p>
+        </div>
+      </article>
+
+      <!-- 4 · flat cap -->
+      <article class="logic">
+        <figure>
+          <svg viewBox="0 0 150 100" role="img" aria-label="Hemispherical caps at a junction bulge into a ball; a flat cap at the node gives a clean carina.">
+            <!-- bulge -->
+            <g transform="translate(6,0)">
+              <path d="M20 30 h26 M20 70 h26" stroke="var(--field-pos)" stroke-width="10" opacity=".14"/>
+              <circle cx="52" cy="50" r="20" fill="var(--pos-wash)" stroke="var(--field-pos)" stroke-width="1.6" stroke-dasharray="3 2"/>
+              <text x="34" y="94" font-family="var(--font-mono)" font-size="8" fill="var(--field-pos)">bulge</text>
+            </g>
+            <path d="M84 50 h12" stroke="var(--text-faint)" stroke-width="1.4" marker-end="url(#ar2)"/>
+            <!-- clean carina -->
+            <g transform="translate(70,0)">
+              <path d="M30 40 L52 47 L30 30 Z" fill="var(--accent-wash)" stroke="var(--accent)" stroke-width="1.6"/>
+              <path d="M30 60 L52 53 L30 70 Z" fill="var(--accent-wash)" stroke="var(--accent)" stroke-width="1.6"/>
+              <line x1="52" y1="47" x2="52" y2="53" stroke="var(--accent)" stroke-width="2.4"/>
+              <text x="28" y="94" font-family="var(--font-mono)" font-size="8" fill="var(--accent)">carina</text>
+            </g>
+            <defs><marker id="ar2" markerWidth="7" markerHeight="7" refX="5.5" refY="3.5" orient="auto"><path d="M0 0 L6 3.5 L0 7 z" fill="var(--text-faint)"/></marker></defs>
+          </svg>
+        </figure>
+        <div class="body">
+          <h3>4 · Flat caps &amp; carina taper</h3>
+          <p>At a junction, hemispherical end-caps balloon into a ball. A <b>flat cap</b> truncates each
+            incident capsule at the node, and an optional <b>carina taper</b> cones the last radii — so
+            <i>N</i> vessels meet in a clean Y / T / X. Terminals get a planar cap for CFD outlets.</p>
+          <p class="where">→ <b>SDF_FLAT_CAP_BIF · taper_bifurcation_carina</b></p>
+        </div>
+      </article>
+
+      <!-- 5 · narrow band -->
+      <article class="logic">
+        <figure>
+          <svg viewBox="0 0 150 100" role="img" aria-label="Only voxels in a thin band around the vessel are evaluated, on a faint grid.">
+            <g stroke="var(--border)" stroke-width="1">
+              <path d="M15 15 H135 M15 35 H135 M15 55 H135 M15 75 H135 M15 85 H135"/>
+              <path d="M15 15 V85 M35 15 V85 M55 15 V85 M75 15 V85 M95 15 V85 M115 15 V85 M135 15 V85"/>
+            </g>
+            <path d="M20 68 C50 62 60 30 130 26" fill="none" stroke="var(--accent)" stroke-width="14" opacity=".16"/>
+            <path d="M20 68 C50 62 60 30 130 26" fill="none" stroke="var(--accent)" stroke-width="2.2"/>
+            <text x="18" y="97" font-family="var(--font-mono)" font-size="8" fill="var(--text-faint)">evaluate only inside the band</text>
+          </svg>
+        </figure>
+        <div class="body">
+          <h3>5 · Narrow band for speed</h3>
+          <p>The zero level-set lives in a thin shell around the capsules, so evaluating the whole grid
+            is wasteful. The field is computed only for voxels inside the <b>union of per-capsule
+            bounding boxes</b>, in batches, querying the nearest few capsules per voxel.</p>
+          <p class="where">→ <b>compute_grid · build_narrow_band</b></p>
+        </div>
+      </article>
+
+      <!-- 6 · smoothing rationale -->
+      <article class="logic">
+        <figure>
+          <svg viewBox="0 0 150 100" role="img" aria-label="A noisy jagged centerline is smoothed into a clean curve to avoid self-intersection.">
+            <path d="M16 60 L28 44 L36 66 L48 40 L58 68 L70 42 L82 64 L96 46 L112 58 L134 50"
+                  fill="none" stroke="var(--field-pos)" stroke-width="1.6" opacity=".5" stroke-dasharray="3 2"/>
+            <path d="M16 60 C40 44 60 56 82 50 C104 44 118 54 134 50" fill="none" stroke="var(--accent)" stroke-width="2.4"/>
+            <text x="16" y="86" font-family="var(--font-mono)" font-size="8" fill="var(--field-pos)">raw</text>
+            <text x="46" y="86" font-family="var(--font-mono)" font-size="8" fill="var(--accent)">B-spline smoothed</text>
+          </svg>
+        </figure>
+        <div class="body">
+          <h3>6 · Smooth first, or the wall vanishes</h3>
+          <p>Raw skeletons are noisy and unevenly sampled. On a tight bend the swept tube
+            <b>self-intersects</b> and the union deletes the inner wall; at junctions, stair-step radius
+            jumps cut necks. Densify, bridge, B-spline-smooth (with a curvature limiter) and clean the
+            radius profile before any capsule is built.</p>
+          <p class="where">→ <b>the smoothing module</b></p>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ─────────────  MODULES  ───────────── -->
+  <section id="modules">
+    <p class="eyebrow">Module map</p>
+    <h2 class="sec">Where the behaviour lives</h2>
+    <p class="sec-lead">
+      The package is function-oriented: no class hierarchy, just single-purpose modules of free
+      functions plus a few plain-data holders. Grouped by role; key public functions listed.
+    </p>
+
+    <div class="mod-grid">
+      <div class="mod-group">
+        <p class="gh"><span class="gc" style="background:var(--accent-2)"></span>Parse &amp; graph processing</p>
+        <div class="mod"><div class="mn">parse_amira</div><div class="md">Read the Amira SpatialGraph (.am / .am.xml).</div><div class="fns"><span>parse_xml</span><span>parse_am</span><span>find_degenerate_segments</span></div></div>
+        <div class="mod"><div class="mn">topology</div><div class="md">Directed topology, junction labels, NetworkX tree builder.</div><div class="fns"><span>build_directed_topology</span><span>label_capsules_by_cross_section</span><span>build_nx_tree</span></div></div>
+        <div class="mod"><div class="mn">centreline_reconnection</div><div class="md">Gap bridging, node weld, contraction, component split.</div><div class="fns"><span>bridge_centerline_gaps</span><span>split_by_graph</span><span>node_id_canon_map</span></div></div>
+        <div class="mod"><div class="mn">smoothing</div><div class="md">Centerline &amp; radius conditioning.</div><div class="fns"><span>smooth_segment_centerlines</span><span>limit_centerline_curvature</span><span>smooth_radius_transitions</span></div></div>
+        <div class="mod"><div class="mn">pruning</div><div class="md">Strahler / radius / terminal-nub pruning.</div><div class="fns"><span>prune_short_terminal_nubs</span><span>segment_mean_radius</span></div></div>
+      </div>
+
+      <div class="mod-group">
+        <p class="gh"><span class="gc" style="background:var(--accent)"></span>SDF → mesh core</p>
+        <div class="mod"><div class="mn">splines</div><div class="md">Per-segment cubic spline + branch tangents.</div><div class="fns"><span>prepare_segment_spline</span><span>branch_tangent_at_node</span></div></div>
+        <div class="mod"><div class="mn">capsules</div><div class="md">Capsule sampling + KD-tree (CapsuleArrays).</div><div class="fns"><span>build_capsules</span><span>clamp_terminal_capsule_radii</span></div></div>
+        <div class="mod core"><div class="mn">sdf_field</div><div class="md">Smooth-min field evaluation + anti-bridge carve.</div><div class="fns"><span>evaluate_sdf</span><span>smooth_min_exp</span><span>adaptive_smin_k</span><span>build_narrow_band</span></div></div>
+        <div class="mod"><div class="mn">mesh_extract</div><div class="md">Iso-surface + bridge cut + flat caps.</div><div class="fns"><span>extract_isosurface</span><span>cut_non_adjacent_bridges</span><span>create_flat_caps</span></div></div>
+        <div class="mod"><div class="mn">mesh_repair</div><div class="md">Taubin smoothing, pymeshfix, hole fill.</div><div class="fns"><span>radius_constrained_taubin</span><span>repair_mesh</span></div></div>
+        <div class="mod"><div class="mn">region_vtk</div><div class="md">Per-face region / Strahler / junction tags.</div><div class="fns"><span>emit_region_vtk_for_surface</span><span>label_surface_topology</span></div></div>
+      </div>
+
+      <div class="mod-group">
+        <p class="gh"><span class="gc" style="background:var(--field-neg)"></span>Orchestration &amp; tools</p>
+        <div class="mod"><div class="mn">pipeline · __main__</div><div class="md">CLI entry + the run orchestrator.</div><div class="fns"><span>run_pipeline</span><span>generate_sdf_surface</span></div></div>
+        <div class="mod"><div class="mn">config</div><div class="md">Single source of truth; SdfConfig snapshot.</div><div class="fns"><span>SdfConfig</span><span># Consumed by:</span></div></div>
+        <div class="mod"><div class="mn">bif_trim · viz</div><div class="md">Carina taper + PyVista debug viewers.</div><div class="fns"><span>taper_bifurcation_carina</span><span>debug_show_mesh</span></div></div>
+        <div class="mod"><div class="mn">flow / wss / annotation</div><div class="md">Downstream CFD &amp; WSS tooling (see below).</div><div class="fns"><span>flow_fractions</span><span>wss_postprocess</span><span>epicardial_annotation</span></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────  CONFIG  ───────────── -->
+  <section id="config">
+    <p class="eyebrow">Configuration</p>
+    <h2 class="sec">One annotated source of truth</h2>
+    <p class="sec-lead">
+      Everything tunable lives in <code>config.py</code>. Module-level constants are the authority
+      (keeping legacy names so historical patches still apply); each carries a <code>#&nbsp;Consumed
+      by:</code> pointer to the functions that read it. <code>SdfConfig</code> is a frozen snapshot for
+      non-mutating overrides. Search the load-bearing knobs below.
+    </p>
+
+    <div class="cfg-tools">
+      <label class="search">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input type="text" id="cfgSearch" placeholder="filter knobs…" aria-label="Filter configuration knobs">
+      </label>
+      <span class="cfg-count" id="cfgCount"></span>
+    </div>
+
+    <div class="table-wrap">
+      <table id="cfgTable">
+        <thead><tr><th>Knob</th><th>Default</th><th>Stage</th><th>What it controls</th></tr></thead>
+        <tbody>
+          <tr><td class="knob">SDF_MESH_METHOD</td><td class="dflt">"meshlib"</td><td class="stage-c">mesh</td><td class="desc">Iso-surface backend: <span class="kbd">meshlib</span> · <span class="kbd">poisson</span> · <span class="kbd">mc</span>.</td></tr>
+          <tr><td class="knob">BSPLINE_SMIN_K</td><td class="dflt">6.0</td><td class="stage-c">smooth-min</td><td class="desc">Base smooth-min sharpness; higher = sharper junctions, less fillet.</td></tr>
+          <tr><td class="knob">SMIN_K_REF_RADIUS</td><td class="dflt">1.5</td><td class="stage-c">smooth-min</td><td class="desc">Radius (mm) at which the adaptive k equals the base k.</td></tr>
+          <tr><td class="knob">SMIN_K_MIN / SMIN_K_MAX</td><td class="dflt">6.0 / 50.0</td><td class="stage-c">smooth-min</td><td class="desc">Clip range for the radius-adaptive smooth-min sharpness.</td></tr>
+          <tr><td class="knob">SDF_FLAT_CAP_BIF</td><td class="dflt">True</td><td class="stage-c">smooth-min</td><td class="desc">Planar truncation of bif-incident capsule ends (removes the ball bulge).</td></tr>
+          <tr><td class="knob">SDF_CARVE_NON_ADJACENT_DEEP</td><td class="dflt">True</td><td class="stage-c">carve</td><td class="desc">Push the field out where a non-adjacent rival capsule intrudes (anti-bridge).</td></tr>
+          <tr><td class="knob">SDF_CARVE_WALL_BAND_FACTOR</td><td class="dflt">0.7</td><td class="stage-c">carve</td><td class="desc">Width of the wall band searched for non-adjacent overlap.</td></tr>
+          <tr><td class="knob">MIN_STRAHLER_ORDER</td><td class="dflt">1</td><td class="stage-c">pruning</td><td class="desc">Drop vessels below this Strahler order (prune the finest twigs).</td></tr>
+          <tr><td class="knob">INPUT_VOXEL_SIZE_UM</td><td class="dflt">1.0</td><td class="stage-c">input</td><td class="desc">Physical size of one input unit in µm. Set to the voxel size for voxel-indexed graphs.</td></tr>
+          <tr><td class="knob">RADIUS_SCALE</td><td class="dflt">1.0</td><td class="stage-c">input</td><td class="desc">Multiply all radii (use 1.0 when the stored thickness already is the radius).</td></tr>
+          <tr><td class="knob">BSPLINE_SDF_RESOLUTION</td><td class="dflt">None</td><td class="stage-c">grid</td><td class="desc">SDF voxel size (mm); None auto-selects from the geometry.</td></tr>
+          <tr><td class="knob">SDF_MAX_CAPSULE_QUERY</td><td class="dflt">64</td><td class="stage-c">grid</td><td class="desc">Nearest capsules considered per voxel — raise for correctness at thick junctions.</td></tr>
+          <tr><td class="knob">CENTERLINE_SMOOTHER</td><td class="dflt">"bspline"</td><td class="stage-c">centerline</td><td class="desc">Centerline smoother: <span class="kbd">bspline</span> · <span class="kbd">savgol</span> · <span class="kbd">none</span>.</td></tr>
+          <tr><td class="knob">LIMIT_CENTERLINE_CURVATURE</td><td class="dflt">True</td><td class="stage-c">centerline</td><td class="desc">Straighten bends whose curvature radius drops below the vessel radius (anti self-intersection).</td></tr>
+          <tr><td class="knob">DENSIFY_SPARSE_SEGMENTS</td><td class="dflt">True</td><td class="stage-c">prepare</td><td class="desc">Interpolate extra centerline points on under-sampled segments.</td></tr>
+          <tr><td class="knob">SMOOTH_RADIUS_TRANSITIONS</td><td class="dflt">True</td><td class="stage-c">radius</td><td class="desc">Blend radii across junctions where the relative jump exceeds the threshold.</td></tr>
+          <tr><td class="knob">MERGE_DEGREE2_SEGMENTS</td><td class="dflt">True</td><td class="stage-c">topology</td><td class="desc">Contract degree-2 pass-through nodes into single segments.</td></tr>
+          <tr><td class="knob">MESH_REPAIR</td><td class="dflt">False</td><td class="stage-c">repair</td><td class="desc">Run the pymeshfix repair pass after extraction.</td></tr>
+          <tr><td class="knob">TAUBIN_JUNCTION_ONLY</td><td class="dflt">True</td><td class="stage-c">repair</td><td class="desc">Feather Taubin smoothing to bifurcation regions only; leave the rest exact.</td></tr>
+          <tr><td class="knob">WRITE_REGION_VTK</td><td class="dflt">True</td><td class="stage-c">output</td><td class="desc">Emit the per-face region-tagged VTK alongside the STL / VTK.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ─────────────  TOOLS  ───────────── -->
+  <section id="tools">
+    <p class="eyebrow">Downstream tools</p>
+    <h2 class="sec">From surface to simulation</h2>
+    <p class="sec-lead">
+      Built on the same parser and topology code, these turn the reconstructed lumen into CFD boundary
+      conditions and analysis. Each is a runnable module (<code>python -m coronary_sdf.&lt;tool&gt;</code>).
+    </p>
+
+    <div class="tool-grid">
+      <article class="tool">
+        <div class="tn">flow_fractions</div><div class="tt">Outlet flow-split BCs</div>
+        <p>Van der Giessen diameter-law flow splits at every bifurcation, propagated to the terminal
+          outlets and matched to boundary zones in an ANSYS <span class="kbd">.msh</span>.</p>
+        <div class="io"><span><b>in</b> .am.xml + .msh</span><span><b>out</b> flow_fractions.csv + CFX .ccl</span></div>
+      </article>
+
+      <article class="tool">
+        <div class="tn">resistance_based_outlet_BC</div><div class="tt">Pressure-outlet BCs</div>
+        <p>Resistance-coupled pressure outlets: each outlet's pressure tracks the live inlet flow via
+          Ohm's law for fluids, using the Giessen fractions. Stable, near-uniform outlet pressure.</p>
+        <div class="io"><span><b>in</b> flow_fractions.csv</span><span><b>out</b> resistance .ccl</span></div>
+      </article>
+
+      <article class="tool">
+        <div class="tn">epicardial_annotation · manual_prune</div><div class="tt">Annotate &amp; prune</div>
+        <p>Annotate the main epicardial vessels once in a 3-D picker; they stay preserved while side
+          branches are pruned at a series of radius ratios — or click branches to cut by hand.</p>
+        <div class="io"><span><b>in</b> .am.xml</span><span><b>out</b> pruned .am.xml + epicardial.json + surfaces</span></div>
+      </article>
+
+      <article class="tool">
+        <div class="tn">wss_postprocess · wss_contour_compare</div><div class="tt">Wall-shear-stress</div>
+        <p>Radially-resolved WSS along main vessels — worst / shielded / mean per station from a swept
+          90° arc window — and a shared-centerline segment sampler for paired statistical comparison.</p>
+        <div class="io"><span><b>in</b> CFD wall CSV + model</span><span><b>out</b> wss_*.csv / .png</span></div>
+      </article>
+
+      <article class="tool">
+        <div class="tn">tube_union</div><div class="tt">Alternative mesher</div>
+        <p>For very wide radius ranges (e.g. HiP-CT microvasculature): a capped tube solid per segment
+          plus junction spheres, merged by a robust MeshLib boolean union. Cost is O(edges).</p>
+        <div class="io"><span><b>in</b> .am / .xml</span><span><b>out</b> single watertight .stl</span></div>
+      </article>
+
+      <article class="tool">
+        <div class="tn">region_vtk output</div><div class="tt">Coloured inspection</div>
+        <p>Every surface is written with per-face <span class="kbd">region_id</span>,
+          <span class="kbd">strahler</span>, <span class="kbd">is_junction</span> and
+          <span class="kbd">bif_level</span> tags for colouring in ParaView.</p>
+        <div class="io"><span><b>in</b> lumen surface</span><span><b>out</b> lumen_bspline*_regions.vtk</span></div>
+      </article>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="foot-inner">
+    <div class="foot-links">
+      <a href="../README.md">README.md</a>
+      <a href="uml_diagrams.md">uml_diagrams.md</a>
+      <a href="../config.py">config.py</a>
+      <a href="../epicardial_annotation_README.md">epicardial_annotation_README.md</a>
+    </div>
+    <div class="foot-note">coronary_sdf · smooth-min capsule SDF lumen reconstruction · explainer</div>
+  </div>
+</footer>
+
+<script>
+  "use strict";
+
+  /* ── theme toggle ── */
+  (function () {
+    const root = document.documentElement;
+    const btn = document.getElementById("themeBtn");
+    const icon = document.getElementById("themeIcon");
+    const label = document.getElementById("themeLabel");
+    const KEY = "coronary_sdf_theme";
+
+    function current() {
+      const stored = localStorage.getItem(KEY);
+      if (stored === "light" || stored === "dark") return stored;
+      return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }
+    function apply(mode) {
+      root.setAttribute("data-theme", mode);
+      icon.textContent = mode === "dark" ? "◑" : "◐";
+      label.textContent = mode === "dark" ? "Dark" : "Light";
+    }
+    apply(current());
+    btn.addEventListener("click", function () {
+      const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      localStorage.setItem(KEY, next);
+      apply(next);
+    });
+  })();
+
+  /* ── active-section nav highlight ── */
+  (function () {
+    const links = Array.from(document.querySelectorAll("nav.anchors a"));
+    const map = new Map();
+    links.forEach(function (a) {
+      const id = a.getAttribute("href").slice(1);
+      const el = document.getElementById(id);
+      if (el) map.set(el, a);
+    });
+    if (!("IntersectionObserver" in window) || map.size === 0) return;
+    const obs = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) {
+          links.forEach(function (l) { l.classList.remove("active"); });
+          const a = map.get(e.target);
+          if (a) a.classList.add("active");
+        }
+      });
+    }, { rootMargin: "-45% 0px -50% 0px", threshold: 0 });
+    map.forEach(function (_a, el) { obs.observe(el); });
+  })();
+
+  /* ── config knob filter ── */
+  (function () {
+    const input = document.getElementById("cfgSearch");
+    const rows = Array.from(document.querySelectorAll("#cfgTable tbody tr"));
+    const count = document.getElementById("cfgCount");
+    const tbody = document.querySelector("#cfgTable tbody");
+    const empty = document.createElement("tr");
+    empty.innerHTML = '<td class="noresult" colspan="4">no knob matches that filter</td>';
+    empty.style.display = "none";
+    tbody.appendChild(empty);
+
+    function update() {
+      const q = input.value.trim().toLowerCase();
+      let shown = 0;
+      rows.forEach(function (r) {
+        const hit = q === "" || r.textContent.toLowerCase().includes(q);
+        r.style.display = hit ? "" : "none";
+        if (hit) shown++;
+      });
+      empty.style.display = shown === 0 ? "" : "none";
+      count.textContent = shown + " / " + rows.length + " knobs";
+    }
+    input.addEventListener("input", update);
+    update();
+  })();
+
+  /* ── fade-in on scroll ── */
+  (function () {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const targets = document.querySelectorAll(".stage, .logic, .mod, .tool, .hero-figure");
+    targets.forEach(function (t) { t.classList.add("fade"); });
+    if (!("IntersectionObserver" in window)) {
+      targets.forEach(function (t) { t.classList.add("in"); });
+      return;
+    }
+    const obs = new IntersectionObserver(function (entries, o) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { e.target.classList.add("in"); o.unobserve(e.target); }
+      });
+    }, { rootMargin: "0px 0px -8% 0px", threshold: 0.05 });
+    targets.forEach(function (t) { obs.observe(t); });
+  })();
+</script>
+</body>
+</html>

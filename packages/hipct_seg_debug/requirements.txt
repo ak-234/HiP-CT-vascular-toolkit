@@ -1,0 +1,13 @@
+# hipct_seg_debug — the viewer/editor environment (Python 3.12).
+#
+# The dependency list now lives in pyproject.toml, so that installing the package
+# and its dependencies is one command:
+#
+#     pip install -e .
+#
+# This file is kept only so that `pip install -r requirements.txt` still does the
+# right thing; it defers to pyproject.toml rather than duplicating the pins.
+#
+# Add `[test]` for pytest:  pip install -e ".[test]"
+
+-e .

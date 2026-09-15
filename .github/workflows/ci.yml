@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # napari and pyvistaqt need a display and the Qt platform libraries; without
+      # these the GUI tests abort with "could not load the Qt platform plugin xcb".
+      - name: Install Qt runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libdbus-1-3 libxkbcommon-x11-0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xfixes0
+
+      # All three, in dependency order. Unlike the pre-monorepo setup this means
+      # the tests that exercise coronary_sdf and skeleton_analysis actually run
+      # instead of skipping.
+      - name: Install all three packages
+        run: |
+          pip install -e packages/skeleton_analysis
+          pip install -e packages/coronary_sdf
+          pip install -e "packages/hipct_seg_debug[dev]"
+
+      # Only hipct_seg_debug is lint-clean today. coronary_sdf (~800) and
+      # skeleton_analysis (~270) predate linting and still report violations
+      # under the same rules; both carry a [tool.ruff] target to clean up
+      # towards. Widen this line as each one is brought to zero.
+      - name: Lint
+        run: ruff check packages/hipct_seg_debug/src packages/hipct_seg_debug/tests
+
+      # The `slow` tests drive a full coronary_sdf pipeline against the real
+      # dataset, which is not in the repository -- `--runslow` stays off in CI.
+      - name: Test skeleton_analysis
+        run: python -m pytest packages/skeleton_analysis/tests -q
+
+      - name: Test coronary_sdf
+        run: python -m pytest packages/coronary_sdf/tests -q
+
+      - name: Test hipct_seg_debug
+        run: xvfb-run -a python -m pytest packages/hipct_seg_debug/tests -q
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [hipct_seg_debug, coronary_sdf, skeleton_analysis]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build packages/${{ matrix.package }}
+      # Catches the metadata errors that only surface at upload time.
+      - run: twine check packages/${{ matrix.package }}/dist/*

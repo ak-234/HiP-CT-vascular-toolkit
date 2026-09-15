@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skeleton_analysis"
+version = "0.1.0"
+description = "Skeletonisation fixes and topological analysis of vascular spatial graphs (Amira/Avizo HxSpatialGraph). Python port of the MATLAB Skeleton_analysis package."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Skeleton_analysis contributors" }]
+keywords = ["vasculature", "skeleton", "amira", "spatial-graph", "strahler", "topology", "HiP-CT"]
+
+dependencies = [
+    "numpy>=1.21",
+    "scipy>=1.7",
+    "networkx>=2.6",
+    "pandas>=1.3",
+]
+
+[project.optional-dependencies]
+viz = ["matplotlib>=3.4", "seaborn>=0.11", "scikit-learn>=1.0"]
+viz3d = ["pyvista>=0.44"]
+image = ["scikit-image>=0.19", "tifffile>=2021.7", "SimpleITK>=2.1"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+skeleton-analysis = "skeleton_analysis.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "image: tests that require the [image] optional dependencies / TIFF fixtures",
+]

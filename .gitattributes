@@ -1,0 +1,21 @@
+# Store text with LF in the repository, and check it out in each platform's own form.
+# Without this the tree is authored on Windows with CRLF while CI runs on Linux, and
+# every file reads as wholly rewritten in a cross-platform diff. `text=auto` leaves the
+# working copy alone on Windows -- it normalises what is committed, not what you edit.
+* text=auto
+
+# Amira spatial graphs and lattices, image stacks and surfaces are binary; a newline
+# conversion would silently corrupt them.
+*.am     binary
+*.stl    binary
+*.tif    binary
+*.tiff   binary
+*.npz    binary
+*.pkl    binary
+
+# Long-form docs and generated reports do not belong in a language breakdown of the
+# repository, and the docs are prose rather than code.
+**/docs/**            linguist-documentation
+packages/*/PORTING.md linguist-documentation
+# One-off diagnostics kept for reproducibility, not shipped code.
+packages/coronary_sdf/research_scripts/** linguist-vendored

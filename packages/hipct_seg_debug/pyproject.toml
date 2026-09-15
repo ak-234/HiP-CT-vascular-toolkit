@@ -1,0 +1,126 @@
+# hipct_seg_debug -- packaging metadata.
+#
+# One-line install, from a checkout:
+#
+#     pip install -e .
+#
+# That pulls every pinned dependency and puts `hipct_seg_debug` on the import path,
+# so `python -m hipct_seg_debug` works from any directory. The sources live under
+# `src/`, so an *uninstalled* checkout is not importable by accident -- the tests
+# always exercise the installed package rather than the working directory.
+#
+# The pins below are load-bearing rather than cautious: numpy must stay on 1.x,
+# because numpy 2 breaks numba (the RLE decoder) and contourpy/matplotlib, and both
+# `napari>=0.8` and an unpinned `opencv-python` drag it in. See README.md "Install".
+#
+# Not listed as dependencies because they are not on PyPI. Both live beside this
+# package in the monorepo and are installed editable from there; see the root
+# README and docs/EDITOR.md "The two sibling packages":
+#   * coronary_sdf       (the SDF surface pipeline)
+#   * skeleton_analysis  (the super metric)
+#
+# The Cascade Forest steps need their own Python 3.9 environment; see
+# environment-cfc.yml.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hipct-seg-debug"
+version = "1.0.0"
+description = "Debug tool for HiP-CT vessel segmentation / skeletonisation / surface pipelines"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "Akash Sivananthan", email = "akashsivananthan@gmail.com" }]
+license = { file = "LICENSE" }
+keywords = ["hip-ct", "segmentation", "skeletonisation", "vasculature", "napari", "microct"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+
+dependencies = [
+    # --- core ---------------------------------------------------------------
+    "numpy==1.26.4",
+    "scipy==1.13.1",
+    "tifffile==2023.4.12",
+
+    # --- viewers ------------------------------------------------------------
+    # `[pyqt5]` brings PyQt5 and qtpy, which pyvistaqt also needs.
+    "napari[pyqt5]==0.5.6",
+    "pyvista==0.46.5",
+    "pyvistaqt==0.12.0",
+
+    # --- measurement and geometry -------------------------------------------
+    "opencv-python==4.10.0.84",  # cv2.arcLength: the pipeline's own perimeter estimator
+    "numba==0.60.0",             # the Amira ByteRLE decoder
+    "networkx==3.3",             # graph traversal in the skeleton tools
+    "scikit-image==0.24.0",      # connected components and contours in the reconnector
+    "pillow==10.4.0",            # JPEG 2000 / PNG slices, alongside tifffile
+    "matplotlib==3.9.2",         # DPC evaluation plots
+
+    # --- skeletonisation and scoring ----------------------------------------
+    "kimimaro==5.8.4",           # TEASAR, one of the `--skeletoniser` backends
+    "scikit-learn==1.5.1",       # DPC feature model
+    "statsmodels==0.14.2",       # DPC statistics
+
+    # --- optional, but small enough to keep in the default set --------------
+    "dask==2024.8.2",            # only for `--volume`, the lazy whole-dataset layers
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1"]
+dev = ["pytest==9.1.1", "ruff==0.14.3", "build==1.2.2", "twine==6.1.0"]
+
+[project.urls]
+Homepage = "https://github.com/ak-234/HiP-CT-vascular-toolkit"
+Documentation = "https://github.com/ak-234/HiP-CT-vascular-toolkit/blob/main/packages/hipct_seg_debug/docs/CLI.md"
+Issues = "https://github.com/ak-234/HiP-CT-vascular-toolkit/issues"
+
+[project.scripts]
+hipct-seg-debug = "hipct_seg_debug.main:main"
+hipct-edit = "hipct_seg_debug.edit.__main__:main"
+
+[tool.setuptools]
+# `src` layout: everything importable lives under `src/`, so the only way to
+# `import hipct_seg_debug` is to have installed it. Test packages are *not* shipped;
+# they live in the top-level `tests/` directory instead.
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"hipct_seg_debug.edit.reconnect" = ["*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py312"
+
+[tool.ruff.lint]
+# The enforced set is pyflakes plus the pycodestyle errors -- rules that flag code
+# that is wrong or dead, which the tree passes clean, so CI failing means something
+# real broke. The stylistic families are deliberately *not* enforced yet: enabling
+# them today would report ~110 findings, dominated by `B905` (`zip()` without
+# `strict=`), and satisfying that one changes runtime behaviour rather than layout.
+# To see them without gating on them:
+#
+#     ruff check src tests --select E,F,W,I,UP,B
+#
+select = ["E", "F", "W"]
+ignore = [
+    "E501",  # long lines are governed by `line-length`, not flagged a second time
+]

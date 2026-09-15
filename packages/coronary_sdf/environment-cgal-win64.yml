@@ -1,0 +1,21 @@
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - cgal-cpp=6.2
+  - cmake>=3.22
+  - ninja
+  - pybind11>=2.12
+  - scikit-build-core
+  - numpy
+  - scipy
+  - pyvista
+  - vtk
+  - networkx
+  - numba
+  - psutil
+  - pytest
+  - pip
+  - pip:
+      - meshlib

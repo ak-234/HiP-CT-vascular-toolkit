@@ -1,0 +1,14 @@
+{
+  "cases": [
+    {
+      "name": "LADAF_2024_28",
+      "graph": "data/LADAF_2024_28/LADAF_2024_28.Spatial-Graph.am",
+      "segmentation": "data/LADAF_2024_28/LADAF_2024_28.segmentation.am"
+    },
+    {
+      "name": "LADAF_2024_56",
+      "graph": "data/LADAF_2024_56/LADAF_2024_56.Spatial-Graph.am",
+      "segmentation": "data/LADAF_2024_56/LADAF_2024_56.segmentation.am"
+    }
+  ]
+}

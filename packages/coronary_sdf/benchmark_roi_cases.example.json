@@ -1,0 +1,99 @@
+{
+  "cases": [
+    {
+      "evaluation_box_mm": [
+        [
+          12.684658081054687,
+          62.79647540283203,
+          87.9680947265625
+        ],
+        [
+          50.42428344726562,
+          92.87948266601562,
+          128.71049816894532
+        ]
+      ],
+      "graph": "data/roi_cases/LADAF_2024_28__degree5_junction.xml",
+      "name": "LADAF_2024_28__degree5_junction",
+      "purpose": "diagnostic",
+      "roi": "degree5_junction",
+      "segmentation": "data/LADAF_2024_28/LADAF_2024_28.segmentation.am"
+    },
+    {
+      "evaluation_box_mm": [
+        [
+          23.817977783203123,
+          78.35045629882812,
+          98.165775390625
+        ],
+        [
+          44.078358764648435,
+          94.45409704589844,
+          125.38830249023437
+        ]
+      ],
+      "graph": "data/roi_cases/LADAF_2024_28__trunk_bifurcation.xml",
+      "name": "LADAF_2024_28__trunk_bifurcation",
+      "purpose": "diagnostic",
+      "roi": "trunk_bifurcation",
+      "segmentation": "data/LADAF_2024_28/LADAF_2024_28.segmentation.am"
+    },
+    {
+      "evaluation_box_mm": [
+        [
+          23.817977783203123,
+          78.35045629882812,
+          98.165775390625
+        ],
+        [
+          44.078358764648435,
+          94.45409704589844,
+          125.38830249023437
+        ]
+      ],
+      "graph": "data/roi_cases/LADAF_2024_28__tortuous_return.xml",
+      "name": "LADAF_2024_28__tortuous_return",
+      "purpose": "diagnostic",
+      "roi": "tortuous_return",
+      "segmentation": "data/LADAF_2024_28/LADAF_2024_28.segmentation.am"
+    },
+    {
+      "evaluation_box_mm": [
+        [
+          23.817977783203123,
+          78.35045629882812,
+          98.165775390625
+        ],
+        [
+          44.078358764648435,
+          94.45409704589844,
+          125.38830249023437
+        ]
+      ],
+      "graph": "data/roi_cases/LADAF_2024_28__parallel_pair.xml",
+      "name": "LADAF_2024_28__parallel_pair",
+      "purpose": "diagnostic",
+      "roi": "parallel_pair",
+      "segmentation": "data/LADAF_2024_28/LADAF_2024_28.segmentation.am"
+    },
+    {
+      "evaluation_box_mm": [
+        [
+          52.853418457031246,
+          41.688494018554685,
+          78.55261767578125
+        ],
+        [
+          78.09636474609374,
+          57.469399902343746,
+          92.6370112915039
+        ]
+      ],
+      "graph": "data/roi_cases/LADAF_2024_28__minimum_radius.xml",
+      "name": "LADAF_2024_28__minimum_radius",
+      "purpose": "diagnostic",
+      "roi": "minimum_radius",
+      "segmentation": "data/LADAF_2024_28/LADAF_2024_28.segmentation.am"
+    }
+  ]
+}
