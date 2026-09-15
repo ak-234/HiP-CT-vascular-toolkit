@@ -87,6 +87,35 @@ packages/
 Generated data — meshes, logs, solver output, image stacks — is excluded by
 `.gitignore` and should stay outside the repository.
 
+## Syncing from the pre-monorepo checkouts
+
+These packages were assembled from separate checkouts on `F:\`. If you still
+work in those, `tools/sync_from_legacy.py` carries changes across — one way
+only, legacy into this repository:
+
+```bash
+python tools/sync_from_legacy.py                 # dry run: what would change
+python tools/sync_from_legacy.py --apply
+python tools/sync_from_legacy.py --apply --only hipct_seg_debug
+```
+
+It handles the `coronary_sdf` layout change (its flat root became `src/`,
+`tests/` and `research_scripts/`) and finds a checkout that has been renamed,
+e.g. `coronary_sdf_local`. Override any location with `LEGACY_CORONARY_SDF`,
+`LEGACY_HIPCT_SEG_DEBUG` or `LEGACY_SKELETON_ANALYSIS`.
+
+**44 files are protected and never overwritten.** They were edited during
+publication — dataset paths replaced by environment variables, imports fixed
+for the new layout, docs rewritten — and their legacy copies still contain the
+originals, so copying them back would silently reintroduce paths like
+`F:/Edo_latest_spatial_graph/...` into code that ships in a wheel. The script
+reports them as blocked; `--diff` shows what differs and `--force-protected`
+overrides once you have read that. After applying, it re-runs the absolute-path
+scan and exits non-zero if anything leaked.
+
+This is one-directional, so the two copies drift. Working directly in this
+repository avoids that entirely.
+
 ## Tests
 
 ```bash
