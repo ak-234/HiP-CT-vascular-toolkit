@@ -25,14 +25,17 @@ jobs:
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
             libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xfixes0
 
-      # All three, in dependency order. Unlike the pre-monorepo setup this means
-      # the tests that exercise coronary_sdf and skeleton_analysis actually run
-      # instead of skipping.
+      # All three in one resolution, the same command the README gives users.
+      # Unlike the pre-monorepo setup this means the tests that exercise
+      # coronary_sdf and skeleton_analysis actually run instead of skipping.
       - name: Install all three packages
-        run: |
-          pip install -e packages/skeleton_analysis
-          pip install -e packages/coronary_sdf
-          pip install -e "packages/hipct_seg_debug[dev]"
+        run: python -m pip install -r requirements.txt
+
+      # The checker is what users run first when something is off, so it has to
+      # pass on a known-good install. --no-gui because only the test step runs
+      # under xvfb; the GUI imports are covered by the hipct_seg_debug suite.
+      - name: Check environment
+        run: python tools/check_environment.py --no-gui
 
       # Only hipct_seg_debug is lint-clean today. coronary_sdf (~800) and
       # skeleton_analysis (~270) predate linting and still report violations

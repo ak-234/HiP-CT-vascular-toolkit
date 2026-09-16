@@ -1,0 +1,14 @@
+# The whole toolkit in one pip resolution:
+#
+#     python -m pip install -r requirements.txt
+#
+# Paths are relative to this file, so it works from any directory. Installing the
+# three packages one at a time makes pip pick an unpinned scipy/networkx for the
+# first two and downgrade them when hipct_seg_debug's exact pins arrive; a single
+# resolution avoids that. The pins themselves live in each package's
+# pyproject.toml -- nothing is duplicated here.
+#
+# `[dev]` adds pytest, ruff, build and twine, which is what CI installs too.
+-e packages/skeleton_analysis
+-e packages/coronary_sdf
+-e packages/hipct_seg_debug[dev]

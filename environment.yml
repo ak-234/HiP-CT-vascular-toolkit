@@ -1,0 +1,34 @@
+# Create the working environment and install all three packages in one step:
+#
+#     conda env create -f environment.yml
+#     conda activate hipct
+#     python tools/check_environment.py
+#
+# Only the interpreter and pip come from conda. Everything else is installed by
+# pip from requirements.txt so the version pins in the packages' pyproject.toml
+# files stay the single source of truth. conda runs pip from this file's
+# directory, so the relative `-r` resolves.
+#
+# Caveat: conda runs that pip step *before* the `variables:` below take effect,
+# so on a machine whose per-user site-packages already holds numpy, napari etc.
+# pip may see them as satisfied and skip them. The checker reports each one as
+# "not installed"; `python -m pip install -r requirements.txt` in the activated
+# env (where PYTHONNOUSERSITE=1 applies) completes the install.
+#
+# The CFC (Python 3.9) and CGAL build environments are separate; see
+# packages/hipct_seg_debug/environment-cfc.yml and
+# packages/coronary_sdf/environment-cgal-win64.yml.
+name: hipct
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - -r requirements.txt
+variables:
+  # Keep the per-user site-packages (%APPDATA%\Python, ~/.local) off sys.path.
+  # A stale editable install left there is how a different checkout ends up
+  # being imported instead of this one. Applied on `conda activate`.
+  PYTHONNOUSERSITE: "1"

@@ -15,26 +15,55 @@ two for surface generation and for the super metric.
 
 ## Install
 
-Python **3.12**. Install all three, in this order — `hipct_seg_debug`'s
-edit/SDF features import the other two, so they need to be present first.
+Python **3.12**. One command creates the environment and installs all three
+packages editable; a second confirms the result.
 
 ```bash
 git clone https://github.com/ak-234/HiP-CT-vascular-toolkit.git
 cd HiP-CT-vascular-toolkit
 
-conda create -n hipct python=3.12 -y
+conda env create -f environment.yml     # creates `hipct` and installs everything
 conda activate hipct
-
-python -m pip install -e packages/skeleton_analysis
-python -m pip install -e packages/coronary_sdf
-python -m pip install -e "packages/hipct_seg_debug[test]"
+python tools/check_environment.py       # every line should read PASS
 ```
 
-Each package is independently installable — nothing forces you to take all
+Into an environment you already have (conda or venv, Python 3.12):
+
+```bash
+python -m pip install -r requirements.txt
+python tools/check_environment.py
+```
+
+[`requirements.txt`](requirements.txt) installs the three packages in a single
+pip resolution, so the version pins in
+[`hipct_seg_debug`'s `pyproject.toml`](packages/hipct_seg_debug/pyproject.toml)
+apply to all of them from the start. Each package is still independently
+installable (`pip install -e packages/<name>`) — nothing forces you to take all
 three — but `hipct_seg_debug` will raise a descriptive `ImportError` from its
 edit and SDF commands until `coronary_sdf` and `skeleton_analysis` are on the
 path. None of the three is published to PyPI, which is why they are not listed
 in each other's `dependencies`.
+
+### If the checker complains
+
+`tools/check_environment.py` prints one line per check with the command that
+fixes it. The failures worth knowing about in advance:
+
+- **`pin numpy … not installed`** (and friends) right after
+  `conda env create` — your per-user `site-packages` (`%APPDATA%\Python\...`
+  on Windows, `~/.local` on Linux) already had those packages, and conda's
+  create-time pip counted them as satisfied. The activated env hides the user
+  site, so they are genuinely missing. Run
+  `python -m pip install -r requirements.txt` once, in the activated env.
+- **`user-site … is on sys.path`** — Python is importing from that per-user
+  directory. Anything installed there shadows the environment, including an
+  old editable install of these packages pointing at another checkout.
+  `environment.yml` sets `PYTHONNOUSERSITE=1` on the env to prevent this; for
+  an env you made yourself run
+  `conda env config vars set PYTHONNOUSERSITE=1 -n <env>` and re-activate.
+- **`editable from <elsewhere>, but this checkout is …`** — the package on the
+  import path comes from a different clone. Uninstall it and reinstall from
+  here with `python -m pip install -r requirements.txt`.
 
 > **`pip` and `python` can be different environments.** If `pip install` reports
 > a Python version you did not expect, use `python -m pip install ...` so the
@@ -42,7 +71,7 @@ in each other's `dependencies`.
 
 > **Do not let pip upgrade numpy.** `hipct_seg_debug`'s pins are load-bearing:
 > numpy 2.x breaks numba (the RLE decoder) and contourpy/matplotlib. See that
-> package's README.
+> package's README. The checker fails on numpy 2.x for this reason.
 
 ### Console scripts
 
@@ -119,10 +148,12 @@ repository avoids that entirely.
 ## Tests
 
 ```bash
+python tools/check_environment.py           # the environment itself
+pytest tools/tests -q                       # the checker and the legacy sync script
 pytest packages/skeleton_analysis/tests -q
 pytest packages/coronary_sdf/tests -q
 pytest packages/hipct_seg_debug/tests -q    # needs a display; use xvfb-run on CI
-ruff check packages/*/src packages/*/tests
+ruff check packages/hipct_seg_debug/src packages/hipct_seg_debug/tests   # the only lint-clean package; CI gates on this
 ```
 
 None of these need a dataset. `hipct_seg_debug` has a `--runslow` flag that opts
