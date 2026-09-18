@@ -80,6 +80,8 @@ def measure_provisional(graph, frame, labels, sids, *, workers, options, progres
             result, partial = combined["result"], raw["result"]
             result.n_truncated += partial.n_truncated
             result.n_ownership_failed += partial.n_ownership_failed
+            result.section_rejection_counts.update(partial.section_rejection_counts)
+            result.section_target_obliquity_degrees.update(partial.section_target_obliquity_degrees)
             result.junction_lengths_um.extend(partial.junction_lengths_um)
             done += len(batch)
             if progress is not None:

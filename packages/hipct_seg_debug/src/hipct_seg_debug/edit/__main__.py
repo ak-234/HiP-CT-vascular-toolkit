@@ -376,6 +376,10 @@ def build_parser() -> argparse.ArgumentParser:
                              help="generate the lumen surface for a graph")
     surface.add_argument("--out-dir", default="surface", help="where to write the STL")
     surface.add_argument("--voxel-mm", type=float, default=None)
+    surface.add_argument("--prepared-report", default=None,
+                         help="reconstruct a prepared graph directly, verifying its report/hash")
+    surface.add_argument("--cells-across-diameter", type=float, default=12.)
+    surface.add_argument("--maximum-cells", type=int, default=5_000_000)
     surface.add_argument("--keep-interpolation", action="store_true",
                          help="mesh Avizo's interpolated fills too; by default they are "
                               "cut out, because a capsule swept along an invented "
@@ -575,6 +579,9 @@ def build_parser() -> argparse.ArgumentParser:
                            "digitised perimeter over-states a tiny section -- is "
                            "measurably wrong: it under-states one. See "
                            "--no-perimeter-correction")
+    radp.add_argument("--section-filter", action="store_true",
+                      help="use the shared finite-volume and slab ownership filter; "
+                           "keep authored junction profiles out of measurements")
     radp.add_argument("--junction-mask-max-fraction", type=float, default=None,
                       help="most of a segment's own length one junction may consume, "
                            "per end (default 0.4, so a fifth of every segment stays "
@@ -1766,6 +1773,9 @@ def _train_probability(graph, rois):
 
 
 def cmd_surface(args) -> int:
+    if getattr(args, 'prepared_report', None):
+        from .prepared_surface import run
+        return run(args)
     from .sdfpatch import SdfSession
 
     graph = _load(args.graph)
@@ -2629,6 +2639,7 @@ def cmd_radius_perimeter(args) -> int:
         graph, frame, labels, max_half=args.max_half,
         max_radius_factor=args.max_radius_factor,
         branch_aware=args.branch_aware,
+        section_filter=args.section_filter,
         root_edges=root_edges,
         tangent_search_degrees=args.tangent_search_deg,
         **({} if args.transverse_axis_ratio is None

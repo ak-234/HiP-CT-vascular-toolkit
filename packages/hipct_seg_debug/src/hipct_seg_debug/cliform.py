@@ -110,6 +110,7 @@ class CommandSpec:
 _ANY = None
 
 PATH_ROLES: dict[tuple[str | None, str], tuple[str, str]] = {
+    (_ANY, "prepared_report"): ("open_file", "JSON report (*.json)"),
     (_ANY, "report_json"): ("save_file", "JSON report (*.json)"),
     (_ANY, "graph"): ("open_file", "Amira spatial graph (*.am)"),
     (_ANY, "reference"): ("open_file", "Amira spatial graph (*.am)"),

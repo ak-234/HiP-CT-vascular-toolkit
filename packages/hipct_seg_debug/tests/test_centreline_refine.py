@@ -25,6 +25,33 @@ def test_line_containment_checks_between_points():
     assert cr.bad_edges(points, sampler, frame).tolist() == [True]
 
 
+def test_compressed_section_processes_match_serial_fitting(tmp_path):
+    import copy
+    from hipct_seg_debug import rle_write, amira, rle
+    shape = (20, 80, 100)
+    frame = make_frame(shape)
+    mask = np.maximum(slit(shape, 7, 2, 2, 98, cy=20, cz=10),
+                      slit(shape, 7, 2, 2, 98, cy=60, cz=10))
+    xyz = frame.seg_to_um([[5, 24, 10], [95, 24, 10], [5, 64, 10], [95, 64, 10]])
+    graph = graph_from(xyz, [(0, 1, 31, 30.), (2, 3, 31, 30.)])
+    other = copy.deepcopy(graph)
+    path = tmp_path/'slits.am'
+    rle_write.write_lattice(path, mask, frame.seg_bbox_um)
+    header = amira.read_lattice_header(path)
+    labels = rle.open_lattice(path, header.fields['Labels'], header.dims, cache_dir=tmp_path/'cache')
+    serial = cr.refine(graph, frame, labels, method='centroid-coherent',
+                       max_iterations=2, max_samples=6, workers=1)
+    progress, checkpoints = [], []
+    parallel = cr.refine(other, frame, labels, method='centroid-coherent',
+                         max_iterations=2, max_samples=6, workers=2,
+                         section_progress=progress.append, checkpoint=checkpoints.append)
+    for sid in graph.segment_ids():
+        np.testing.assert_allclose(other.coords(sid), graph.coords(sid), atol=1e-9)
+    assert serial.history == parallel.history
+    assert len(progress) == 2*parallel.iterations
+    assert len(checkpoints) == parallel.iterations
+
+
 def test_movement_cannot_jump_into_another_lumen():
     frame = make_frame((5, 8, 10))
     mask = np.ones((5, 8, 10), dtype=np.uint8)

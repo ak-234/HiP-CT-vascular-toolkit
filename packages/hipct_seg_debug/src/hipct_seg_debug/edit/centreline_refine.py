@@ -5,7 +5,8 @@ module never changes radii or topology. All distances are in WorldFrame micromet
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+import multiprocessing
 from dataclasses import asdict, dataclass, field
 import threading
 import time
@@ -17,7 +18,8 @@ from scipy.sparse.linalg import spsolve
 
 from ..crosssection import _PlaneSampler, robust_edge_tangents, stable_transverse_cut
 from .interpolation import mask_for_segment
-from .radius_perimeter import _BranchContext, _rival_lies_in_blob
+from .radius_perimeter import _BranchContext as _BranchContext, _rival_lies_in_blob
+from .section_validation import SectionContext
 
 METHODS = ("none", "centroid-spline", "centroid-coherent", "laplacian", "taubin")
 
@@ -87,7 +89,8 @@ def feasible_move(old, new, sampler, frame):
                for a, b in zip(before[moved], after[moved]))
 
 
-def spline_fit(x, target, weights, scale, spacing, strength=.1, ends=None):
+def spline_fit(x, target, weights, scale, spacing, strength=.1, ends=None,
+               end_tangents=None):
     """Cubic smoothing fit in physical arclength, with exact shared endpoints.
 
     Centre observations use arclength quadrature so adding sample points does not
@@ -109,24 +112,45 @@ def spline_fit(x, target, weights, scale, spacing, strength=.1, ends=None):
     count = len(internal)+4
     knots = np.r_[[0.]*4, internal, [s[-1]]*4]
     basis = BSpline.design_matrix(s, knots, 3).tocsr()
-    # Integrate the squared second derivative with physical quadrature.
-    spl = BSpline(knots, np.eye(count), 3)
-    grid = np.linspace(0, s[-1], max(16, 2*count))
-    bending = sparse.csr_matrix(spl.derivative(2)(grid))
     q = np.r_[np.diff(s)[0]/2, (s[2:]-s[:-2])/2, np.diff(s)[-1]/2]
     w = np.asarray(weights)*q
     # Weak support where the segmentation could not supply a measurement.
     w = np.maximum(w, .005*q)
     h = basis.T @ sparse.diags(w) @ basis
-    local_grid = np.interp(grid, s, local_scale)
-    h += strength*(grid[1]-grid[0])*(bending.T @ sparse.diags(local_grid**4) @ bending)
+    # Optimise the SAME physical-arclength objective that the line search tests.
+    # A different continuous-spline penalty can propose uphill steps for the
+    # sampled graph and falsely report a converged local fit as blocked.
+    velocity = sparse.diags(1/np.diff(s))@(basis[1:]-basis[:-1])
+    bending = sparse.diags(1/q[1:-1])@(velocity[1:]-velocity[:-1])
+    h += strength*(bending.T @ sparse.diags(q[1:-1]*local_scale[1:-1]**4) @ bending)
     rhs = basis.T @ (w[:, None]*target)
+    # With uneven sampling, a knot interval can have no observations. The
+    # sampled objective then leaves a coefficient undetermined. A numerical
+    # prior on those null directions avoids singular solves; movement is still
+    # accepted against the unregularised physical objective below.
+    ridge = 64*np.finfo(float).eps*max(1., float(h.diagonal().max()))
+    greville = np.array([knots[i+1:i+4].mean() for i in range(count)])
+    prior = np.column_stack([np.interp(greville, s, x[:, axis]) for axis in range(3)])
+    h += ridge*sparse.eye(count, format='csr')
+    rhs += ridge*prior
     fixed = np.array([0, count-1])
     end = x[[0, -1]] if ends is None else np.asarray(ends)
     free = np.arange(1, count-1)
     coeff = np.empty((count, 3))
     coeff[fixed] = end
-    coeff[free] = spsolve(h[free][:, free].tocsc(), rhs[free]-h[free][:, fixed] @ end)
+    if end_tangents is not None:
+        left, right = end_tangents
+        if left is not None:
+            coeff[1] = end[0]+np.asarray(left)*(knots[4]-knots[3])/3
+            fixed = np.r_[fixed, 1]
+        if right is not None:
+            coeff[-2] = end[-1]-np.asarray(right)*(knots[-4]-knots[-5])/3
+            fixed = np.r_[fixed, count-2]
+        fixed = np.unique(fixed)
+        free = np.setdiff1d(np.arange(count), fixed)
+    if len(free):
+        coeff[free] = spsolve(h[free][:, free].tocsc(),
+                             rhs[free]-h[free][:, fixed] @ coeff[fixed])
     out = basis @ coeff
     out[[0, -1]] = end
     return out
@@ -176,6 +200,7 @@ class RefinementReport:
     radii_require_remeasurement: bool = False
     history: list = field(default_factory=list)
     segments: dict = field(default_factory=dict)
+    neighbourhoods: dict = field(default_factory=dict)
 
     def to_dict(self):
         return asdict(self)
@@ -187,6 +212,30 @@ def _open_worker(labels, frame, local):
         labels = open_lattice(labels.path, labels.field, labels.dims,
                               cache_dir=getattr(labels, "_cache_dir", None))
     local.sampler = _PlaneSampler(labels, frame)
+
+
+_SECTION_WORKER = None
+
+
+def _init_section_worker(triple, frame, lattice, scale, max_half, max_samples, coherent):
+    from .graphmodel import EditableGraph
+    from ..rle import open_lattice
+    global _SECTION_WORKER
+    graph = EditableGraph(triple)
+    labels = open_lattice(*lattice[:3], cache_dir=lattice[3])
+    _SECTION_WORKER = (graph, frame, _PlaneSampler(labels, frame), SectionContext(graph),
+                       scale, max_half, max_samples, coherent)
+
+
+def _section_work(sid):
+    graph, frame, sampler, context, scale, max_half, max_samples, coherent = _SECTION_WORKER
+    start, diagnostics = time.monotonic(), {}
+    if len(graph.coords(sid)) < 4:
+        result = (graph.coords(sid).copy(), np.zeros(len(graph.coords(sid))), [], [])
+    else:
+        result = _targets(graph, sid, frame, sampler, context, scale[sid], max_half,
+                          max_samples, coherent, diagnostics)
+    return sid, result, diagnostics, time.monotonic()-start
 
 
 def _crosses_section(graph, sid, origin, tangent, cut, spacing):
@@ -208,7 +257,7 @@ def _crosses_section(graph, sid, origin, tangent, cut, spacing):
 
 
 def _targets(graph, sid, frame, sampler, ctx, scale, max_half, max_samples,
-             coherent=False):
+             coherent=False, diagnostics=None):
     x = graph.coords(sid)
     n = len(x)
     target, weights = x.copy(), np.zeros(n)
@@ -219,12 +268,15 @@ def _targets(graph, sid, frame, sampler, ctx, scale, max_half, max_samples,
     ids = np.unique(np.searchsorted(s, np.linspace(0., s[-1], min(n, max_samples))))
     invented = mask_for_segment(graph, sid)
     accepted, measured_scale = [], []
+    section_context = ctx if isinstance(ctx, SectionContext) else SectionContext(graph)
     for i in ids:
         if len(invented) == n and invented[i]:
             continue
         chosen = stable_transverse_cut(
             sampler, frame.um_to_seg(x[i])[0], tangents[i], max(scale[i]/sp, 2.),
             spacing_um=sp, max_half=max_half, centroid_mode="drift",
+            validator=section_context.validator(sid, tangents[i], sampler, frame, diagnostics),
+            diagnostics=diagnostics,
             **({"transverse_axis_ratio": np.inf} if coherent else {}),
             slab_offsets=(0., .25, .5) if i == 0 else (
                 (-.5, -.25, 0.) if i == n-1 else (-.5, 0., .5)),
@@ -234,10 +286,6 @@ def _targets(graph, sid, frame, sampler, ctx, scale, max_half, max_samples,
         c = chosen.cut
         # Do not recenter a merged branch onto the combined lumen's centroid.
         # Unresolved regions receive curve support from exclusive sections.
-        rivals = ctx.rivals(sid, x[i], chosen.tangent, max(scale[i], sp))
-        if any(_crosses_section(graph, int(item[0]), x[i], chosen.tangent, c, sp)
-               for item in rivals):
-            continue
         centre = np.argwhere(c.blob8).mean(axis=0)-c.half
         candidate = x[i] + sp*(centre[0]*c.u + centre[1]*c.v)
         if not np.all(sampler.at(line_samples_ijk(frame.um_to_seg(x[i])[0],
@@ -252,11 +300,13 @@ def _targets(graph, sid, frame, sampler, ctx, scale, max_half, max_samples,
 
 def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
            fixed_nodes=(), move_junctions=True, strength=.1, max_iterations=25,
-           max_half=256, max_samples=32, workers=1, progress=None):
+           max_half=256, max_samples=32, workers=1, progress=None,
+           section_progress=None, checkpoint=None):
     """Refine selected segments with full-graph branch context, preserving radii.
 
-    Junctions move only if every incident segment participates and provides two
-    trusted sections. Roots, terminals and unsupported junctions remain anchored.
+    Junctions move only when every incident segment participates. Overlapping
+    neighbourhoods share their external section support. Roots and terminals
+    remain anchored; insufficiently supported neighbourhoods are reported.
     """
     if method not in METHODS:
         raise ValueError(f"unknown refinement method: {method}")
@@ -280,49 +330,51 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
     held = set(fixed_nodes) | {nid for nid in graph.nodes if graph.degree(nid) == 1}
     local = threading.local()
     stable_rounds = 0
+    previous_moves = {}
+    previous_support = {}
+    segment_stable_rounds = {sid: 0 for sid in sids}
+    from ..rle import ByteRLELattice, RawLattice
+    process_sections = workers > 1 and isinstance(labels, (ByteRLELattice, RawLattice))
     with ThreadPoolExecutor(max_workers=workers, initializer=_open_worker,
                             initargs=(labels, frame, local)) as pool:
         for iteration in range(max_iterations if method != "none" else 0):
-            ctx = _BranchContext.build(graph)
+            ctx = None if process_sections else SectionContext(graph)
             before = {sid: graph.coords(sid).copy() for sid in sids}
+            section_diagnostics = {sid: {} for sid in sids}
 
             def work(sid):
                 if len(before[sid]) < 4:
                     return sid, (before[sid].copy(), np.zeros(len(before[sid])), [], [])
                 return sid, _targets(graph, sid, frame, local.sampler, ctx, scale[sid],
-                                     max_half, max_samples, method == "centroid-coherent")
+                                     max_half, max_samples, method == "centroid-coherent",
+                                     diagnostics=section_diagnostics[sid])
 
-            observations = dict(pool.map(work, sids))
-            # One least-squares intersection of the supported incident centre rays.
+            if process_sections and sids:
+                lattice = (labels.path, labels.field, labels.dims, getattr(labels, '_cache_dir', None))
+                with ProcessPoolExecutor(max_workers=min(workers, len(sids)),
+                        mp_context=multiprocessing.get_context('spawn'),
+                        initializer=_init_section_worker,
+                        initargs=(graph.triple, frame, lattice, scale, max_half, max_samples,
+                                  method == 'centroid-coherent')) as processes:
+                    observations = {}
+                    futures = [processes.submit(_section_work, sid) for sid in sids]
+                    for future in as_completed(futures):
+                        sid, result, diagnostics, seconds = future.result()
+                        observations[sid] = result
+                        section_diagnostics[sid] = diagnostics
+                        if section_progress:
+                            section_progress(dict(iteration=iteration+1, segment=sid,
+                                                  accepted_sections=len(result[2]), seconds=seconds))
+            else:
+                observations = dict(pool.map(work, sids))
+            # Internal unsupported links can be fitted from exclusive sections on
+            # the external approaches of a jointly solved junction cluster.
             node_targets = {}
             if move_junctions and method.startswith("centroid-"):
-                for nid in graph.nodes:
-                    incident = list(graph.node_segments(nid))
-                    if nid in held or len(incident) < 2 or not set(incident) <= set(sids):
-                        continue
-                    matrices, rhs = [], []
-                    for sid in incident:
-                        target, weights, good, _ = observations[sid]
-                        if len(good) < 2:
-                            break
-                        near = good[:2] if graph.segment(sid)["node1"] == nid else good[-2:]
-                        p, q = target[near]
-                        tangent = q-p
-                        norm = np.linalg.norm(tangent)
-                        if norm < sp*.1:
-                            break
-                        tangent /= norm
-                        projection = np.eye(3)-np.outer(tangent, tangent)
-                        matrices.append(projection)
-                        rhs.append(projection @ p)
-                    if len(matrices) != len(incident):
-                        continue
-                    old_node = np.asarray(graph.nodes[nid][:3])
-                    mat = sum(matrices)+.05*np.eye(3)
-                    candidate = np.linalg.solve(mat, sum(rhs)+.05*old_node)
-                    if np.all(sampler.at(line_samples_ijk(frame.um_to_seg(old_node)[0],
-                                                         frame.um_to_seg(candidate)[0])) > 0):
-                        node_targets[nid] = candidate
+                selected = set(sids)
+                node_targets = {nid: np.asarray(graph.nodes[nid][:3]) for nid in graph.nodes
+                                if nid not in held and graph.degree(nid) >= 2
+                                and set(graph.node_segments(nid)) <= selected}
 
             proposals = {}
             accepted_total = 0
@@ -335,14 +387,13 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                         arclength(x), arclength(x)[good], measured))
                 report.segments[sid] = dict(accepted_sections=len(good),
                                             sampled_points=min(len(x), max_samples),
+                                            section_diagnostics=section_diagnostics[sid],
                                             section_scale_um=float(np.median(scale[sid])))
                 if len(good) < 2 or len(x) < 4:
                     proposals[sid] = x.copy()
                     continue
                 if method.startswith("centroid-"):
-                    seg = graph.segment(sid)
-                    ends = [node_targets.get(seg[k], x[i])
-                            for k, i in (("node1", 0), ("node2", -1))]
+                    ends = x[[0, -1]]
                     # Huber reweighting in voxel units avoids one centroid dominating.
                     residual = np.linalg.norm(target-x, axis=1)
                     # The first pass must be able to correct a sustained large offset.
@@ -354,43 +405,92 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                     proposals[sid] = laplacian_fit(x, scale[sid], sp,
                                                    taubin=method == "taubin", strength=strength)
 
-            # Connected groups share a single line-search step so junction endpoints
-            # cannot split. With fixed nodes each segment can backtrack independently.
+            # Smooth interiors with fixed endpoints before joint node fitting.
             groups = [{sid} for sid in sids]
-            for nid in node_targets:
-                incident = set(graph.node_segments(nid))
-                touched = [g for g in groups if g & incident]
-                groups = [g for g in groups if not g & incident]
-                groups.append(set().union(*touched))
+            from .junction_refine import fit_objective, refine_neighbourhoods
             moves = []
             blocked = 0
+            oscillations = 0
+            support_changes = 0
+            changed_support = set()
+            blocked_ids = set()
             with graph.batch("segmentation-constrained centreline refinement"):
                 for group in groups:
-                    alpha = .75
+                    sid = next(iter(group))
+                    delta = proposals[sid]-before[sid]
+                    previous = previous_moves.get(sid)
+                    oscillating = previous is not None and np.sum(delta*previous) < 0
+                    oscillations += int(oscillating)
+                    alpha = .25 if oscillating else 1.
+                    support = tuple(observations[sid][2])
+                    support_changes += int(sid in previous_support and previous_support[sid] != support)
+                    if sid in previous_support and previous_support[sid] != support:
+                        changed_support.add(sid)
+                    previous_support[sid] = support
+                    target, weights = observations[sid][:2]
+                    initial_cost = fit_objective(before[sid], target, weights, scale[sid],
+                                                 before[sid], sp, strength)
                     while alpha >= 1/256:
                         trial = {sid: before[sid]+alpha*(proposals[sid]-before[sid])
                                  for sid in group}
                         if all(feasible_move(before[sid], trial[sid], sampler, frame)
+                               and fit_objective(trial[sid], observations[sid][0],
+                                   observations[sid][1], scale[sid], before[sid], sp, strength)
+                               <= initial_cost+1e-9*max(1., initial_cost)
                                for sid in group):
                             break
                         alpha /= 2
                     if alpha < 1/256:
                         blocked += len(group)
+                        blocked_ids.update(group)
                         continue
                     for sid in sorted(group):
                         moves.extend(np.linalg.norm(trial[sid]-before[sid], axis=1))
+                        previous_moves[sid] = trial[sid]-before[sid]
                         graph.set_segment_coords(sid, trial[sid])
+                if method.startswith("centroid-") and move_junctions:
+                    neighbourhoods = refine_neighbourhoods(
+                        graph, node_targets, observations, scale, sampler, frame, strength)
+                    report.neighbourhoods = neighbourhoods
+                    for row in neighbourhoods.values():
+                        if row['status'] == 'blocked':
+                            blocked_ids.update(row['segments'])
+                    blocked = len(blocked_ids)
+                # Include shared-node and neighbourhood movement in convergence.
+                moves = [float(np.linalg.norm(graph.coords(sid)-before[sid], axis=1).max())
+                         for sid in sids if len(before[sid])]
             peak = float(max(moves, default=0.))
             report.iterations = iteration+1
             report.history.append(dict(iteration=iteration+1, max_move_um=peak,
-                                       accepted_sections=accepted_total, blocked_segments=blocked))
+                                       accepted_sections=accepted_total, blocked_segments=blocked,
+                                       oscillating_segments=oscillations,
+                                       changed_support_segments=support_changes))
             if progress:
                 progress(report.history[-1])
-            stable_rounds = stable_rounds+1 if peak < .1*sp and blocked == 0 else 0
+            if checkpoint:
+                report.seconds = time.monotonic()-t0
+                checkpoint(report.to_dict())
+            curve_supported = {sid for sid in sids if len(observations[sid][2]) >= 2}
+            for row in report.neighbourhoods.values():
+                if row['status'] not in ('moving', 'stationary'):
+                    continue
+                nodes = set(row['nodes'])
+                curve_supported.update(sid for sid in row['segments'] if {
+                    graph.segment(sid)['node1'], graph.segment(sid)['node2']} <= nodes)
+            for sid, movement in zip(sids, moves):
+                segment_stable_rounds[sid] = (segment_stable_rounds[sid]+1
+                    if movement < .1*sp and sid in curve_supported
+                    and sid not in blocked_ids and sid not in changed_support else 0)
+                report.segments[sid]['curve_supported'] = sid in curve_supported
+                report.segments[sid]['converged'] = segment_stable_rounds[sid] >= 2
+            supported = len(curve_supported) == len(sids) and all(
+                row['status'] in ('moving', 'stationary') for row in report.neighbourhoods.values())
+            stable_rounds = (stable_rounds+1 if peak < .1*sp and blocked == 0
+                             and supported and support_changes == 0 else 0)
             if stable_rounds >= 2:
                 report.converged = True
                 break
-            if peak < 1e-9:
+            if peak < 1e-9 and (not supported or blocked):
                 break
     for sid in sids:
         x = graph.coords(sid)
@@ -400,6 +500,9 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
         report.segments.setdefault(sid, {}).update(
             median_move_um=float(np.median(dist)) if len(dist) else 0.,
             max_move_um=float(max(dist, default=0.)))
+        row = report.segments[sid]
+        row['status'] = ('insufficient_support' if not row.get('curve_supported', False) else
+                         'converged' if row.get('converged', False) else 'review_required')
     report.moved_nodes = len({graph.segment(sid)[key] for sid in sids
                              for key, i in (("node1", 0), ("node2", -1))
                              if len(original[sid]) and np.linalg.norm(
