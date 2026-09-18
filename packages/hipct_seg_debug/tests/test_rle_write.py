@@ -57,6 +57,24 @@ def test_round_trip(tmp_path, case):
     assert np.array_equal(lattice.decode_sequential(volume.shape[0]), volume)
 
 
+def test_concurrent_decoders_share_only_the_read_only_compressed_stream(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    rng = np.random.default_rng(16)
+    volume = rng.integers(0, 4, (12, 57, 61), dtype=np.uint8)
+    volume[:, 15:35] = 0
+    _, _, lattice = _write_and_read(tmp_path, volume)
+    jobs = [(z, lo, hi) for z in range(12) for lo, hi in ((0, 57), (13, 37), (32, 56))]
+    def read(job):
+        z, lo, hi = job
+        return lattice.slice_rows(z, lo, hi)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(read, jobs))
+    for (z, lo, hi), result in zip(jobs, results):
+        np.testing.assert_array_equal(result, volume[z, lo:hi])
+    results[0][:] = 255
+    np.testing.assert_array_equal(lattice.slice_z(0), volume[0])
+
+
 # ------------------------------------------------------------------ row bands
 
 

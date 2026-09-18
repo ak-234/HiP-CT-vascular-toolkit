@@ -779,9 +779,15 @@ def _point_tangents(graph) -> np.ndarray:
         try:
             from .crosssection import robust_edge_tangents
 
-            derivative = robust_edge_tangents(
-                points[a:b], radii_for_tangents[a:b], spacing_um=spacing_hint
-            )
+            if n < 4:
+                # A quadratic through three corner samples extrapolates the end
+                # direction beyond the last edge. There is no supported smooth
+                # approach fit here: retain the incident edge's one-sided plane.
+                derivative = np.gradient(points[a:b], axis=0)
+            else:
+                derivative = robust_edge_tangents(
+                    points[a:b], radii_for_tangents[a:b], spacing_um=spacing_hint
+                )
         except Exception:
             derivative = np.gradient(points[a:b], axis=0)
         norm = np.linalg.norm(derivative, axis=1)

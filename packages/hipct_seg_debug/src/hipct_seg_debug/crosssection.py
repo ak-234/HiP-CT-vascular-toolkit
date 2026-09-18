@@ -160,6 +160,7 @@ class StablePlaneCut:
     perimeter_ratio: float
     centroid_ratio: float
     searched: bool = False
+    owned: bool = False
     perimeter_um: float = float("nan")  # of `cut.blob4`; the search's objective
     axis_ratio: float = float("nan")  # major/minor semi-axis of `cut.blob4`
     #: ``perimeter on the fitted tangent / perimeter on the chosen one``, or NaN when
@@ -567,6 +568,8 @@ def stable_transverse_cut(
     transverse_axis_ratio: float = TRANSVERSE_AXIS_RATIO,
     grow_radii: float | None = None,
     centroid_mode: str = "offset",
+    validator=None,
+    diagnostics: dict | None = None,
 ) -> StablePlaneCut | None:
     """Choose a closed, stable transverse section from a bounded tangent search.
 
@@ -624,9 +627,15 @@ def stable_transverse_cut(
         raise ValueError("slab_offsets must contain three values including zero")
     centre_slot = next(i for i, x in enumerate(offsets) if abs(x) < 1e-12)
     best_perimeter = np.inf
+    def refused(reason):
+        if diagnostics is not None:
+            diagnostics[reason] = diagnostics.get(reason, 0) + 1
+
     for ci, cand in enumerate(candidates):
         cuts: list[PlaneCut | None] = [None, None, None]
         failed = False
+        owned = False
+        slab_validator = getattr(validator, 'validate_slab', None)
         # The requested centre first, and the two slab companions only if it is still
         # in the running. The objective is the centre section's perimeter; the slab
         # exists to validate the winner, so an alternate that already reads longer
@@ -642,14 +651,30 @@ def stable_transverse_cut(
                          else int(float(grow_radii) * radius_vox) + 2),
             )
             if c is None or c.touches_border:
+                refused("insufficient_support" if c is None else "truncation")
                 failed = True
                 break
+            if validator is not None and slab_validator is None:
+                verdict = validator(c, shifted, cand)
+                if not verdict.accepted:
+                    refused(verdict.reason)
+                    failed = True
+                    break
             cuts[slot] = c
-            if slot == centre_slot and _perimeter_um(c.blob4, spacing_um) >= best_perimeter:
+            if (slab_validator is None and slot == centre_slot
+                    and _perimeter_um(c.blob4, spacing_um) >= best_perimeter):
                 failed = True
                 break
         if failed:
             continue
+        if slab_validator is not None:
+            verdict = slab_validator(cuts, centre, cand, radius_vox, offsets, max_half)
+            if not verdict.accepted:
+                refused(verdict.reason)
+                continue
+            if verdict.cuts is not None:
+                cuts = verdict.cuts
+                owned = True
         metrics = [_cut_metrics(c, spacing_um) for c in cuts]
         areas = np.array([m[0] for m in metrics])
         perimeters = np.array([m[1] for m in metrics])
@@ -681,7 +706,7 @@ def stable_transverse_cut(
             stable.append(
                 StablePlaneCut(
                     chosen_cut, cand.copy(), area_ratio, perimeter_ratio,
-                    centroid_ratio, searched=ci > 0,
+                    centroid_ratio, searched=ci > 0, owned=owned,
                     perimeter_um=float(perimeters[centre_slot]),
                     axis_ratio=axis_ratio,
                     centroid_offset_ratio=centroid_offset_ratio,
@@ -696,6 +721,8 @@ def stable_transverse_cut(
             best_perimeter = min(best_perimeter, float(perimeters[centre_slot]))
             if ci == 0 and axis_ratio <= float(transverse_axis_ratio):
                 break
+        else:
+            refused("unstable_section")
     if not stable:
         return None
     best = min(stable, key=lambda item: item.perimeter_um)

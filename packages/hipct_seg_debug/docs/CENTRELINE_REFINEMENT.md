@@ -38,10 +38,18 @@ both can remove jitter while leaving a systematic offset unchanged. Local scales
 vary along each segment, and arclength weighting avoids assigning more influence
 to densely sampled regions. The original radius is not a permanent movement cap.
 
-Accepted section centroids must belong to an exclusive, closed lumen. A nearby
-branch is considered a rival only if its centreline actually intersects the cut
-plane inside that lumen; projecting an axially displaced continuation into the
-plane would incorrectly exclude short segments.
+Centreline fitting and opt-in `radius-perimeter --section-filter` use the same
+finite-branch ownership and three-plane stability checks. Angles are diagnostic:
+a neighbouring axis need not cross a plane for its lumen to contaminate it.
+Spatially separate parallel branches remain acceptable. Non-adjacent touching
+lumens can be separated by a shared 3D watershed; ambiguous incident junction
+sections remain unsupported. Every alternative orientation passes the same checks.
+
+Overlapping junction neighbourhoods are fitted together with fixed outer anchors.
+Degree-two joins share a position and derivative; branching nodes retain separate
+approach directions and calibres. Unsupported internal links can receive curve
+support from exclusive sections on the external approaches. Missing external
+support remains an explicit failure, not an inferred anatomical measurement.
 
 Defaults are 25 iterations, 32 sample stations per segment, strength 0.1 and a
 256-voxel maximum half-window. Convergence requires two steps below 0.1 voxel.
@@ -55,7 +63,15 @@ py -3.12 -m hipct_seg_debug.edit prepare-reconstruction centred_measured.am --se
 ```
 
 Run this **after** final radius measurement and **before** surface reconstruction.
-It transports those radii unchanged onto a separate smooth displacement field.
+The compatibility default, `--radius-profile preserve`, retains the input radii.
+`--radius-profile confidence` preserves trusted anchors and fills unsupported spans
+with shape-preserving interpolation in log radius. Degree-two boundary conflicts
+are remeasured and unresolved disagreements remain flagged. Junction extensions
+retain each branch's own calibre. Separate point fields retain measured radius,
+reconstruction radius, adjustment and reason. `--skip-clearance` prepares this
+profile without moving the graph.
+
+Clearance correction transports the derived radii unchanged on a smooth displacement field.
 Do not remeasure radii on the displaced reconstruction layout: they describe the
 measurement graph, which the report identifies.
 
@@ -109,3 +125,7 @@ python -m hipct_seg_debug.edit.centreline_synthetic_benchmark --out runs/synthet
 See [the LADAF-2021-17 qualification report](CENTRELINE_QUALIFICATION_2021_17.md)
 for completed comparisons and the remaining acceptance gaps. Generated graphs,
 segmentation data and per-region outputs are local artifacts, excluded from Git.
+
+See [junction refinement and qualification](JUNCTION_REFINEMENT.md) for the shared
+filter, direct prepared-surface command, checkpointed regional runner and current
+rollout limitations.

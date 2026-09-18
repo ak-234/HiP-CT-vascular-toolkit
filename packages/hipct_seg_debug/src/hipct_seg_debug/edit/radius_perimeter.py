@@ -219,6 +219,8 @@ class RadiusResult:
     source: dict = field(default_factory=dict)  # {sid: (N,) int8, see SOURCE_NAMES}
     reject_reason: dict = field(default_factory=dict)  # {sid: (N,) int8, see REJECT_NAMES}
     resolution_mode: dict = field(default_factory=dict)  # see RESOLUTION_NAMES
+    section_rejection_counts: dict = field(default_factory=dict)
+    section_target_obliquity_degrees: dict = field(default_factory=dict)
     n_measured: int = 0
     n_filled: int = 0
     n_truncated: int = 0
@@ -723,7 +725,47 @@ def _owned_plane_cut(labels_plane: np.ndarray, half: int, u, v):
     )
 
 
-def _resolve_owned_cut(
+def _ownership_volume(sampler, coords_ijk, sid, rival_sids, centre_ijk, extent, stable_ownership):
+    from scipy import ndimage
+    lo = np.asarray(centre_ijk) - extent
+    hi = np.asarray(centre_ijk) + extent + 1
+    roi, origin = sampler.box(lo, hi)
+    if roi.size == 0 or not roi.any():
+        return None
+    branch_ids = [sid] + sorted(set(int(x) for x in rival_sids))
+    branch_coords = [_roi_polyline_samples(coords_ijk[x], origin, roi.shape)
+                     for x in branch_ids if x in coords_ijk]
+    if len(branch_coords) != len(branch_ids):
+        return None
+    markers = _raster_markers(roi.astype(bool), origin, branch_coords)
+    if markers is None:
+        return None
+    positive = sorted(set(int(x) for x in np.unique(markers) if x > 0))
+    if positive != list(range(1, len(branch_ids) + 1)):
+        return None
+
+    distance = ndimage.distance_transform_edt(roi > 0)
+    if stable_ownership:
+        from skimage.segmentation import watershed
+        # Float distance preserves narrow saddles. FIFO plateau handling prevents
+        # a seed from claiming the far vessel's outer shell on quantized ties.
+        owned = watershed(-distance, np.maximum(markers, 0), mask=roi > 0, connectivity=1)
+    else:
+        inv = np.zeros_like(distance)
+        inv[roi > 0] = 1.0 / (distance[roi > 0] + 0.5)
+        vmax = float(inv.max()) or 1.0
+        elevation = np.rint(254.0 * inv / vmax).astype(np.uint8)
+        elevation[roi == 0] = 255
+        owned = ndimage.watershed_ift(
+            elevation, markers, structure=ndimage.generate_binary_structure(3, 1)
+        )
+    if np.any(owned[markers > 0] != markers[markers > 0]):
+        return None
+    owned[roi == 0] = 0
+    return owned, origin
+
+
+def _resolve_owned_slab(
     sampler,
     graph,
     coords_ijk: dict[int, np.ndarray],
@@ -735,62 +777,79 @@ def _resolve_owned_cut(
     half: int,
     max_half: int,
     spacing_um: float,
+    offsets=(-0.5, 0.0, 0.5),
+    stable_ownership=True,
+    volume_cache=None,
 ):
     """Separate non-adjacent touching branches in a local 3-D watershed ROI."""
-    from scipy import ndimage
-    from ..crosssection import _plane_axes, _perimeter_um, sample_label_plane
+    from ..crosssection import _plane_axes, sample_label_plane
 
     extent = min(int(max_half), max(int(4.0 * radius_vox) + 2, int(half) + 2))
-    lo = np.asarray(centre_ijk) - extent
-    hi = np.asarray(centre_ijk) + extent + 1
-    roi, origin = sampler.box(lo, hi)
-    if roi.size == 0 or not roi.any():
-        return None
-    branch_ids = [sid] + sorted(set(int(x) for x in rival_sids))
-    branch_coords = [coords_ijk[x] for x in branch_ids if x in coords_ijk]
-    if len(branch_coords) != len(branch_ids):
-        return None
-    markers = _raster_markers(roi.astype(bool), origin, branch_coords)
-    if markers is None:
-        return None
-    positive = sorted(set(int(x) for x in np.unique(markers) if x > 0))
-    if positive != list(range(1, len(branch_ids) + 1)):
-        return None
-
-    distance = ndimage.distance_transform_edt(roi > 0)
-    inv = np.zeros_like(distance)
-    inv[roi > 0] = 1.0 / (distance[roi > 0] + 0.5)
-    vmax = float(inv.max()) or 1.0
-    elevation = np.rint(254.0 * inv / vmax).astype(np.uint8)
-    elevation[roi == 0] = 255
-    owned = ndimage.watershed_ift(
-        elevation, markers, structure=ndimage.generate_binary_structure(3, 1)
-    )
-    if np.any(owned[markers > 0] != markers[markers > 0]):
-        return None
-    owned[roi == 0] = 0
+    key = (tuple(np.asarray(centre_ijk)), extent, sid, tuple(sorted(rival_sids)), stable_ownership)
+    volume = volume_cache.get(key) if volume_cache is not None else None
+    if volume is None:
+        volume = _ownership_volume(sampler, coords_ijk, sid, rival_sids, centre_ijk, extent, stable_ownership)
+        if volume is None:
+            return None
+        if volume_cache is not None:
+            # Bound memory to one ROI per station, shared across alternative
+            # orientations with the same finite-branch ownership seeds.
+            volume_cache.clear()
+            volume_cache[key] = volume
+    owned, origin = volume
     axes = _plane_axes(np.asarray(tangent, dtype=float))
     if axes is None:
         return None
     u, v = axes
     cuts = []
-    for offset in (-0.5, 0.0, 0.5):
+    for offset in offsets:
         centre = np.asarray(centre_ijk) + offset * float(radius_vox) * tangent
         plane = sample_label_plane(owned, origin, centre, u, v, half)
         c = _owned_plane_cut(plane, half, u, v)
         if c is None or c.touches_border:
             return None
         cuts.append(c)
+    return cuts
+
+
+def _resolve_owned_cut(sampler, graph, coords_ijk, sid, rival_sids, centre_ijk,
+                       tangent, radius_vox, half, max_half, spacing_um):
+    from ..crosssection import _perimeter_um
+    cuts = _resolve_owned_slab(sampler, graph, coords_ijk, sid, rival_sids, centre_ijk,
+                               tangent, radius_vox, half, max_half, spacing_um, stable_ownership=False)
+    if cuts is None:
+        return None
     areas = np.array([float(c.blob4.sum()) for c in cuts])
     perimeters = np.array([_perimeter_um(c.blob4, spacing_um) for c in cuts])
-    if (
-        np.any(areas <= 0)
-        or np.any(perimeters <= 0)
-        or areas.max() / areas.min() > 1.5
-        or perimeters.max() / perimeters.min() > 1.5
-    ):
+    if (np.any(areas <= 0) or np.any(perimeters <= 0)
+            or areas.max()/areas.min() > 1.5 or perimeters.max()/perimeters.min() > 1.5):
         return None
     return cuts[1]
+
+
+def _roi_polyline_samples(coords, origin, shape):
+    """Seed finite edges, including edges with both stored points outside the ROI.
+
+    Clip before voxel traversal so uneven sampling neither loses a branch nor
+    rasterizes an entire long vessel for a small ownership volume.
+    """
+    from .centreline_refine import line_samples_ijk
+    lower, upper = np.asarray(origin), np.asarray(origin)+np.asarray(shape[::-1])-1
+    samples = []
+    for a, b in zip(coords[:-1], coords[1:]):
+        d = b-a
+        lo, hi = 0., 1.
+        for axis in range(3):
+            if abs(d[axis]) < 1e-12:
+                if a[axis] < lower[axis] or a[axis] > upper[axis]:
+                    hi = -1.
+                    break
+            else:
+                t = sorted(((lower[axis]-a[axis])/d[axis], (upper[axis]-a[axis])/d[axis]))
+                lo, hi = max(lo, t[0]), min(hi, t[1])
+        if lo <= hi:
+            samples.append(line_samples_ijk(a+lo*d, a+hi*d))
+    return np.vstack(samples) if samples else np.empty((0, 3))
 
 
 def _directed_topology(graph, root_edges=()) -> tuple[dict[int, int], dict[int, int | None]]:
@@ -930,6 +989,10 @@ def _apply_bifurcation_tapers(
     fallback: set[int] = set()
     for nid in graph.nodes:
         if graph.degree(nid) < 3:
+            continue
+        if any(sid not in measured for sid in graph.node_segments(nid)):
+            # Regional measurement retains the full graph as spatial context.
+            # A profile requires measurements from every incident branch.
             continue
         parent_sid = parents.get(nid)
         if parent_sid is None:
@@ -1167,6 +1230,7 @@ def measure_radii(
     n_passes: int = 1,
     workers: int = 1,
     progress=None,
+    section_filter: bool = False,
     _segment_ids=None,
     _raw_only: bool = False,
 ) -> RadiusResult:
@@ -1207,6 +1271,8 @@ def measure_radii(
     if isinstance(workers, bool) or int(workers) != workers or workers < 1:
         raise ValueError("workers must be a positive integer")
     workers = int(workers)
+    if section_filter and not branch_aware:
+        raise ValueError('section_filter requires full branch-aware validation')
     if workers > 1 and int(n_passes) != 1:
         raise ValueError("parallel measurement currently requires n_passes=1")
     if min_blob_voxels is None:
@@ -1271,6 +1337,8 @@ def measure_radii(
     # stored radii were distorting the measurement geometry on your data.
     n_passes = max(1, int(n_passes))
     scale_by_sid: dict[int, np.ndarray] = {}
+    from .section_validation import SectionContext
+    section_context = SectionContext(graph) if branch_aware and section_filter else None
     pass_medians: list[float] = []
     if workers > 1:
         from .radius_parallel import measure_provisional
@@ -1279,6 +1347,7 @@ def measure_radii(
             graph, frame, labels, sids, workers=workers, progress=progress,
             options=dict(
                 gate_voxels=gate_voxels, max_half=max_half,
+                section_filter=section_filter,
                 min_blob_voxels=min_blob_voxels, branch_aware=branch_aware,
                 root_edges=root_edges, tangent_search_degrees=tangent_search_degrees,
                 transverse_axis_ratio=transverse_axis_ratio,
@@ -1362,6 +1431,10 @@ def measure_radii(
             if invented.size != n:
                 invented = np.zeros(n, dtype=bool)
             invented_by_sid[sid] = invented
+            if section_filter:
+                from .section_validation import REJECTION_REASONS
+                result.section_rejection_counts[sid] = np.zeros((n, len(REJECTION_REASONS)), dtype=int)
+                result.section_target_obliquity_degrees[sid] = np.zeros(n)
 
             for i in range(n):
                 if invented[i]:
@@ -1377,6 +1450,7 @@ def measure_radii(
                     continue
                 rp = max(float(scale[i]) / sp, 1.0)
                 chosen = None
+                section_diagnostics = {}
                 if branch_aware:
                     chosen = stable_transverse_cut(
                         sampler,
@@ -1390,14 +1464,33 @@ def measure_radii(
                         slab_offsets=(0.0, 0.25, 0.5) if i == 0 else (
                             (-0.5, -0.25, 0.0) if i == n - 1 else (-0.5, 0.0, 0.5)
                         ),
-                        transverse_axis_ratio=transverse_axis_ratio,
+                        transverse_axis_ratio=(np.inf if section_filter else transverse_axis_ratio),
+                        validator=(section_context.validator(sid, tangents[i], sampler, frame, section_diagnostics)
+                                   if section_context is not None else None),
+                        diagnostics=section_diagnostics,
                         grow_radii=grow_radii,
                         centroid_mode=stability_centroid_mode,
                         max_variation=stability_variation,
                         max_centroid_radii=stability_centroid_radii,
                     )
                     c = chosen.cut if chosen is not None else None
+                    if section_filter:
+                        result.section_rejection_counts[sid][i] = [
+                            section_diagnostics.get(reason, 0) for reason in REJECTION_REASONS]
+                        result.section_target_obliquity_degrees[sid][i] = section_diagnostics.get(
+                            'max_target_obliquity_degrees', 0.)
+                    if chosen is not None and chosen.owned:
+                        modes[i] = OWNED_PLANE
                     tangent = chosen.tangent if chosen is not None else tangents[i]
+                    if section_filter and chosen is None:
+                        if "neighbouring_lumen_contamination" in section_diagnostics:
+                            reject[i] = BRANCH_OVERLAP
+                        elif "truncation" in section_diagnostics:
+                            reject[i] = TRUNCATED
+                            result.n_truncated += 1
+                        elif "unstable_section" in section_diagnostics:
+                            reject[i] = UNSTABLE
+                        continue
                 else:
                     c = cut(
                         sampler, ijk[i], tangents[i], min(int(rp * 2.5) + 2, max_half),
@@ -1408,6 +1501,12 @@ def measure_radii(
 
                 rivals = branch_context.rivals(sid, coords[i], tangent, float(scale[i])) if branch_context else []
                 adjacent_overlap[i] = any(item[4] for item in rivals)
+                if section_filter:
+                    # Every accepted candidate and slab companion is exclusive
+                    # under the shared finite-volume test. Do not reintroduce
+                    # projection-only junction masking or ownership below.
+                    rivals = []
+                    adjacent_overlap[i] = False
 
                 if c is None:
                     if branch_aware:
@@ -1513,7 +1612,7 @@ def measure_radii(
                     float(c.half) * sp > RUNAWAY_HALF_RADII * max(float(scale[i]), sp)
                 )
 
-            if branch_aware:
+            if branch_aware and not section_filter:
                 node_runs: dict[int, list[int]] = {}
                 junction, lengths = _adaptive_junction_mask(
                     graph, sid, arc, stable, adjacent_overlap,
@@ -1644,7 +1743,7 @@ def measure_radii(
         carina_tip_factor=carina_tip_factor,
         continuation_ratio=continuation_ratio,
         daughter_carina=bifurcation_tapers,
-    ) if (bifurcation_tapers or junction_parent_profile) else set()
+    ) if (not section_filter and (bifurcation_tapers or junction_parent_profile)) else set()
     result.fallback_segments.extend(sorted(taper_fallback))
     for sid in sids:
         measured, source, reject = raw_measured[sid], raw_source[sid], raw_reject[sid]
@@ -1777,19 +1876,39 @@ def apply_radii(graph, result: RadiusResult, *, mean_radius: bool = True) -> Non
             reject_by_id[int(pid)] = int(value)
         for pid, value in zip(pids, np.asarray(result.resolution_mode[sid], dtype=np.int64)):
             resolution_by_id[int(pid)] = int(value)
-    triple.point_attrs["radius_source"] = by_id
+    triple.point_attrs.setdefault("radius_source", {}).update(by_id)
     triple.point_attr_dtypes["radius_source"] = np.dtype(np.int64)
-    triple.point_attrs["radius_reject_reason"] = reject_by_id
+    triple.point_attrs.setdefault("radius_reject_reason", {}).update(reject_by_id)
     triple.point_attr_dtypes["radius_reject_reason"] = np.dtype(np.int64)
-    triple.point_attrs["radius_resolution_mode"] = resolution_by_id
+    triple.point_attrs.setdefault("radius_resolution_mode", {}).update(resolution_by_id)
     triple.point_attr_dtypes["radius_resolution_mode"] = np.dtype(np.int64)
+    from .section_validation import REJECTION_REASONS
+    for sid, counts in result.section_rejection_counts.items():
+        pids = graph.segment(sid)['point_ids']
+        for col, reason in enumerate(REJECTION_REASONS):
+            name = 'radius_section_rejected_'+reason
+            triple.point_attrs.setdefault(name, {}).update(dict(zip(pids, counts[:, col].tolist())))
+            triple.point_attr_dtypes[name] = np.dtype(np.int64)
+        name = 'radius_section_max_obliquity_degrees'
+        triple.point_attrs.setdefault(name, {}).update(dict(zip(
+            pids, result.section_target_obliquity_degrees[sid].tolist())))
+        triple.point_attr_dtypes[name] = np.dtype(np.float64)
+    if 'radius_measured_um' in triple.point_attrs:
+        # A deliberate remeasurement supersedes cached reconstruction provenance
+        # only on the measured segments. The next profile starts from these values.
+        for sid, radii in result.radii.items():
+            pids = graph.segment(sid)['point_ids']
+            for name in ('radius_measured_um', 'radius_reconstruction_um'):
+                triple.point_attrs.setdefault(name, {}).update(dict(zip(pids, radii.tolist())))
+            for name in ('radius_adjustment_um', 'radius_adjustment_reason'):
+                triple.point_attrs.setdefault(name, {}).update(dict.fromkeys(pids, 0))
 
     if mean_radius:
         from .optimise import set_edge_field
 
         means = np.array(
-            [float(np.mean(result.radii[sid]))
-             if len(result.radii.get(sid, ())) else np.nan
+            [float(np.mean(graph.radii(sid)))
+             if len(graph.radii(sid)) else np.nan
              for sid in graph.segment_ids()],
             dtype=np.float64,
         )
