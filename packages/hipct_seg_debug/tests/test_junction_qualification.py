@@ -8,6 +8,25 @@ from hipct_seg_debug.edit.junction_qualification import evaluate
 from .conftest_geometry import cylinder, make_frame, graph_from
 
 
+def test_experimental_full_tree_runs_without_regional_qualification(tmp_path, monkeypatch):
+    from hipct_seg_debug.edit import junction_qualification as jq
+    source = tmp_path/'input.am'
+    source.write_text('fixture')
+    calls = []
+    def evaluate(args, target=None):
+        calls.append((target, args.measurement_only))
+        return {'status': 'review_required'}
+    monkeypatch.setattr(jq, 'evaluate', evaluate)
+    out = tmp_path/'review'
+    status = jq.main(['--graph', str(source), '--seg', str(source), '--out-dir', str(out),
+                     '--experimental-full-tree', '--measurement-only'])
+    assert calls == [(None, True)]
+    assert status == 2
+    report = json.loads((out/'summary.json').read_text())[0]
+    assert report['status'] == 'review_required'
+    assert report['experimental_full_tree'] is True
+
+
 def test_regional_pipeline_writes_separate_measurements_profile_mesh_and_overlays(tmp_path):
     frame = make_frame((32, 32, 70))
     labels = cylinder((32, 32, 70), 5, 2, 68)

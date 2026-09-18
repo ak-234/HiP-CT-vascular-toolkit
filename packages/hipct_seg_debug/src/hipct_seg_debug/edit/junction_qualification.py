@@ -123,6 +123,12 @@ def evaluate(args, target=None):
                                   median_radius_um=float(np.median(graph.radii(sid)))) for sid in selected}
         _save(graph, str(measured_path), [args.graph], voxel_um=stamp)
         write_json(directory/'measurement.json', measurement)
+    if getattr(args, 'measurement_only', False):
+        report = dict(target_segment=target, selected_segments=selected, geometry=geometry,
+                      measurement=measurement, measurement_graph=[str(measured_path)],
+                      status='review_required', next_stage='derive reconstruction profiles and validate surfaces')
+        write_json(directory/'report.json', report)
+        return report
     review = subset(graph, selected)
     profile = prepare_profile(review, policy='confidence', spacing_um=float(frame.seg_spacing[0])).to_dict()
     conflicts = sorted({sid for row in profile['conflicts'] for sid in row['segments']})
@@ -186,11 +192,19 @@ def main(argv=None):
     parser.add_argument('--cells-across-diameter', type=float, default=8.)
     parser.add_argument('--maximum-cells', type=int, default=5_000_000)
     parser.add_argument('--full-tree', action='store_true', help='run full tree only after every selected region qualifies')
+    parser.add_argument('--experimental-full-tree', action='store_true',
+                        help='run the full tree directly; bypass regional scheduling, not quality checks')
+    parser.add_argument('--measurement-only', action='store_true',
+                        help='stop after saving remeasured radii; reconstruction remains unvalidated')
     parser.add_argument('--geometry-only', action='store_true',
                         help='checkpoint a geometry experiment without starting radius or surface work')
     args = parser.parse_args(argv)
-    if not args.segment:
+    if not args.segment and not args.experimental_full_tree:
         parser.error('provide the known failure regions and untouched controls with --segment')
+    if args.experimental_full_tree and (args.full_tree or args.segment):
+        parser.error('--experimental-full-tree is a standalone full-tree experiment')
+    if args.geometry_only and args.measurement_only:
+        parser.error('choose one stopping stage')
     if args.geometry_only and args.full_tree:
         parser.error('--geometry-only cannot qualify a full-tree reconstruction')
     out = Path(args.out_dir)
@@ -208,6 +222,11 @@ def main(argv=None):
     if (out/'manifest.json').exists() and json.loads((out/'manifest.json').read_text()) != manifest:
         raise ValueError('checkpoint inputs, code or options changed; use a new output directory')
     write_json(out/'manifest.json', manifest)
+    if args.experimental_full_tree:
+        report = evaluate(args)
+        report['experimental_full_tree'] = True
+        write_json(out/'summary.json', [report])
+        return 0 if report['status'] == 'qualified' else 2
     reports = []
     for target in sorted(set(args.segment)):
         if any(target in row.get('target_segments', []) for row in reports):

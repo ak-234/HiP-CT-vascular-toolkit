@@ -70,27 +70,34 @@ def feasible_move(old, new, sampler, frame):
     from jumping across background to a different vessel. Existing gaps remain
     explicitly unresolved rather than being silently repaired.
     """
+    return movement_rejection(old, new, sampler, frame) is None
+
+
+def movement_rejection(old, new, sampler, frame):
+    """Explain a refused move without conflating containment and stationarity."""
     if not np.isfinite(new).all():
-        return False
+        return 'nonfinite_proposal'
     original_bad = bad_edges(old, sampler, frame)
     if np.any(bad_edges(new, sampler, frame) & ~original_bad):
-        return False
+        return 'new_segmentation_exit'
     if original_bad.any():
         fixed = np.r_[original_bad, False] | np.r_[False, original_bad]
         if np.any(np.linalg.norm(new[fixed]-old[fixed], axis=1) > 1e-7):
-            return False
+            return 'preexisting_gap_anchor_moved'
     if np.any(_reversals(new) & ~_reversals(old)):
-        return False
+        return 'new_reversal'
     if np.any(np.linalg.norm(np.diff(new, axis=0), axis=1) < 1e-8):
-        return False
+        return 'collapsed_edge'
     before, after = frame.um_to_seg(old), frame.um_to_seg(new)
     moved = np.linalg.norm(after-before, axis=1) > 1e-8
-    return all(np.all(sampler.at(line_samples_ijk(a, b)) > 0)
-               for a, b in zip(before[moved], after[moved]))
+    if not all(np.all(sampler.at(line_samples_ijk(a, b)) > 0)
+               for a, b in zip(before[moved], after[moved])):
+        return 'movement_crosses_background'
+    return None
 
 
 def spline_fit(x, target, weights, scale, spacing, strength=.1, ends=None,
-               end_tangents=None):
+               end_tangents=None, fixed_points=()):
     """Cubic smoothing fit in physical arclength, with exact shared endpoints.
 
     Centre observations use arclength quadrature so adding sample points does not
@@ -113,7 +120,7 @@ def spline_fit(x, target, weights, scale, spacing, strength=.1, ends=None,
     knots = np.r_[[0.]*4, internal, [s[-1]]*4]
     basis = BSpline.design_matrix(s, knots, 3).tocsr()
     q = np.r_[np.diff(s)[0]/2, (s[2:]-s[:-2])/2, np.diff(s)[-1]/2]
-    w = np.asarray(weights)*q
+    w = np.maximum(np.asarray(weights), .005)*q
     # Weak support where the segmentation could not supply a measurement.
     w = np.maximum(w, .005*q)
     h = basis.T @ sparse.diags(w) @ basis
@@ -124,6 +131,26 @@ def spline_fit(x, target, weights, scale, spacing, strength=.1, ends=None,
     bending = sparse.diags(1/q[1:-1])@(velocity[1:]-velocity[:-1])
     h += strength*(bending.T @ sparse.diags(q[1:-1]*local_scale[1:-1]**4) @ bending)
     rhs = basis.T @ (w[:, None]*target)
+    if ends is None and end_tangents is None:
+        # Fit a smooth displacement, so the unchanged sampled curve is always
+        # admissible. An absolute spline cannot represent every noisy input;
+        # its best fit can therefore be uphill even at arbitrarily small steps.
+        from scipy.linalg import null_space
+        ids = np.unique(np.r_[0, np.asarray(fixed_points, dtype=int), n-1])
+        null = null_space(basis[ids].toarray())
+        if not null.shape[1]:
+            return x.copy()
+        velocity_x = np.diff(x, axis=0)/np.diff(s)[:, None]
+        curvature_x = np.diff(velocity_x, axis=0)/q[1:-1, None]
+        gradient = basis.T @ (w[:, None]*(target-x))
+        gradient -= strength*bending.T @ (
+            (q[1:-1]*local_scale[1:-1]**4)[:, None]*curvature_x)
+        reduced = null.T @ h @ null
+        ridge = 64*np.finfo(float).eps*max(1., float(np.diag(reduced).max()))
+        correction = null @ np.linalg.solve(reduced+ridge*np.eye(len(reduced)), null.T@gradient)
+        out = x+basis@correction
+        out[ids] = x[ids]
+        return out
     # With uneven sampling, a knot interval can have no observations. The
     # sampled objective then leaves a coefficient undetermined. A numerical
     # prior on those null directions avoids singular solves; movement is still
@@ -393,14 +420,16 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                     proposals[sid] = x.copy()
                     continue
                 if method.startswith("centroid-"):
-                    ends = x[[0, -1]]
                     # Huber reweighting in voxel units avoids one centroid dominating.
                     residual = np.linalg.norm(target-x, axis=1)
                     # The first pass must be able to correct a sustained large offset.
                     typical = max(sp, float(np.median(residual[weights > 0])))
                     weights *= np.minimum(1., 2*typical/np.maximum(residual, sp))
+                    bad = bad_edges(x, sampler, frame)
+                    pinned = np.flatnonzero(np.r_[bad, False] | np.r_[False, bad])
+                    report.segments[sid]['gap_anchor_points'] = len(pinned)
                     proposals[sid] = spline_fit(x, target, weights, scale[sid], sp,
-                                                strength, ends)
+                                                strength, fixed_points=pinned)
                 else:
                     proposals[sid] = laplacian_fit(x, scale[sid], sp,
                                                    taubin=method == "taubin", strength=strength)
@@ -433,16 +462,18 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                     while alpha >= 1/256:
                         trial = {sid: before[sid]+alpha*(proposals[sid]-before[sid])
                                  for sid in group}
-                        if all(feasible_move(before[sid], trial[sid], sampler, frame)
-                               and fit_objective(trial[sid], observations[sid][0],
-                                   observations[sid][1], scale[sid], before[sid], sp, strength)
-                               <= initial_cost+1e-9*max(1., initial_cost)
-                               for sid in group):
+                        reason = movement_rejection(before[sid], trial[sid], sampler, frame)
+                        cost = fit_objective(trial[sid], target, weights, scale[sid],
+                                             before[sid], sp, strength)
+                        if reason is None and cost > initial_cost+1e-9*max(1., initial_cost):
+                            reason = 'objective_increase'
+                        if reason is None:
                             break
                         alpha /= 2
                     if alpha < 1/256:
                         blocked += len(group)
                         blocked_ids.update(group)
+                        report.segments[sid]['blocked_reason'] = reason
                         continue
                     for sid in sorted(group):
                         moves.extend(np.linalg.norm(trial[sid]-before[sid], axis=1))
@@ -467,9 +498,6 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                                        changed_support_segments=support_changes))
             if progress:
                 progress(report.history[-1])
-            if checkpoint:
-                report.seconds = time.monotonic()-t0
-                checkpoint(report.to_dict())
             curve_supported = {sid for sid in sids if len(observations[sid][2]) >= 2}
             for row in report.neighbourhoods.values():
                 if row['status'] not in ('moving', 'stationary'):
@@ -487,6 +515,10 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                 row['status'] in ('moving', 'stationary') for row in report.neighbourhoods.values())
             stable_rounds = (stable_rounds+1 if peak < .1*sp and blocked == 0
                              and supported and support_changes == 0 else 0)
+            report.converged = stable_rounds >= 2
+            if checkpoint:
+                report.seconds = time.monotonic()-t0
+                checkpoint(report.to_dict())
             if stable_rounds >= 2:
                 report.converged = True
                 break

@@ -113,6 +113,21 @@ It starts the full sequence only when every supplied region passes geometry,
 radius-profile, clearance and actual-mesh checks. It does not certify that the
 user-supplied control set is statistically independent or representative.
 
+For an explicitly requested full-tree experiment before regional qualification,
+use `--experimental-full-tree` without `--segment` or `--full-tree`.
+`--measurement-only` stops after writing the separate measured graph and reports
+`review_required`; it does not certify geometry or produce a validated surface.
+Iteration checkpoints include current support/convergence fields. Existing gaps
+remain reported constraints, not repaired anatomy.
+
+Convergence diagnostics distinguish unsupported approaches, containment failures
+and objective increases. Interior centroid fitting uses a smooth spline
+displacement with endpoints and points adjoining existing gaps fixed during the
+solve. This includes the unchanged sampled curve in the feasible model: an
+absolute spline fit could previously propose only uphill or forbidden moves.
+Neighbourhood reports identify the specific segments and constraints blocking a
+joint step. A stationary but unsupported neighbourhood still requires review.
+
 ## Local evidence and limitations, 2026-09-18
 
 The earlier five-iteration regional experiment completed for the known failures

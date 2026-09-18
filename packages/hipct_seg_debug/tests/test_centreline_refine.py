@@ -25,6 +25,31 @@ def test_line_containment_checks_between_points():
     assert cr.bad_edges(points, sampler, frame).tolist() == [True]
 
 
+def test_spline_displacement_preserves_gap_anchors_and_descends():
+    from hipct_seg_debug.edit.junction_refine import fit_objective
+    s = np.linspace(0, 500, 81)
+    x = np.c_[s, 8*np.sin(s/17)+3*np.cos(s/3), np.zeros(len(s))]
+    target = x.copy()
+    target[:, 1] = 0
+    weights = np.ones(len(x))
+    pinned = [23, 24, 25]
+    result = cr.spline_fit(x, target, weights, 35., 2., fixed_points=pinned)
+    np.testing.assert_array_equal(result[[0, *pinned, 80]], x[[0, *pinned, 80]])
+    assert np.linalg.norm(result-x) > 1
+    assert fit_objective(result, target, weights, 35., x, 2., .1) < fit_objective(
+        x, target, weights, 35., x, 2., .1)
+
+
+def test_preexisting_gap_movement_reports_constraint_not_convergence():
+    frame = make_frame((5, 5, 12))
+    mask = np.ones((5, 5, 12), dtype=np.uint8)
+    mask[:, :, 5] = 0
+    x = frame.seg_to_um([[2, 2, 2], [4, 2, 2], [6, 2, 2], [9, 2, 2]])
+    changed = x.copy()
+    changed[1, 1] += .01
+    assert cr.movement_rejection(x, changed, _PlaneSampler(mask, frame), frame) == 'preexisting_gap_anchor_moved'
+
+
 def test_compressed_section_processes_match_serial_fitting(tmp_path):
     import copy
     from hipct_seg_debug import rle_write, amira, rle

@@ -58,7 +58,7 @@ def fit_cluster(graph, nodes, spans, observations, scales, sampler, frame, stren
     exactly by a linear equality constraint. A single containment line search
     accepts or refuses the entire neighbourhood.
     """
-    from .centreline_refine import arclength, feasible_move, bad_edges
+    from .centreline_refine import arclength, movement_rejection, bad_edges
     sp = float(frame.seg_spacing[0])
     nodes = set(nodes)
     old = {sid: graph.coords(sid).copy() for sid in spans}
@@ -173,12 +173,16 @@ def fit_cluster(graph, nodes, spans, observations, scales, sampler, frame, stren
         for sid, (lo, hi) in spans.items():
             candidate[sid][lo:hi+1] = trial[indices[sid]]
         after = objective(trial)
-        if (np.isfinite(trial).all() and after <= before+1e-9*max(1., before)
-                and all(feasible_move(old[sid], candidate[sid], sampler, frame) for sid in spans)):
+        reasons = {sid: reason for sid in spans
+                   if (reason := movement_rejection(old[sid], candidate[sid], sampler, frame))}
+        uphill = not np.isfinite(after) or after > before+1e-9*max(1., before)
+        if not uphill and not reasons:
             break
         alpha /= 2
     if alpha < 1/256:
-        return dict(report, status='blocked', objective_before=before)
+        return dict(report, status='blocked', objective_before=before,
+                    objective_after=after, objective_increase=bool(uphill),
+                    blocked_reasons=reasons)
     peak = float(np.linalg.norm(trial-initial, axis=1).max())
     for sid in sorted(spans):
         graph.set_segment_coords(sid, candidate[sid])
