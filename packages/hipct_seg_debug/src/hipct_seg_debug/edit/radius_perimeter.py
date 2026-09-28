@@ -1233,6 +1233,7 @@ def measure_radii(
     section_filter: bool = False,
     _segment_ids=None,
     _raw_only: bool = False,
+    _worker_cache: dict | None = None,
 ) -> RadiusResult:
     """Measure the radius of every centreline point's own cross-section.
 
@@ -1293,7 +1294,20 @@ def measure_radii(
         raise ValueError("tangent_search_degrees must be between zero and 45")
 
     result = RadiusResult()
-    sampler = _PlaneSampler(labels, frame)
+    # Each measurement process owns an immutable graph during its provisional
+    # batches. Reuse full-tree indexes and decoded row bands across those batches.
+    # Never reuse this cache across refinement iterations or apply_radii calls.
+    if _worker_cache is not None and (not _raw_only or workers != 1):
+        raise ValueError('worker cache is only valid for serial provisional batches')
+    cache = {} if _worker_cache is None else _worker_cache
+    identity = (id(graph), id(frame), id(labels), branch_aware, section_filter)
+    if cache.setdefault('identity', identity) != identity:
+        raise ValueError('worker cache belongs to different measurement inputs')
+    def cached(key, build):
+        if key not in cache:
+            cache[key] = build()
+        return cache[key]
+    sampler = cached('sampler', lambda: _PlaneSampler(labels, frame))
     sp = float(frame.seg_spacing[0])
     dims = np.asarray(frame.seg_dims, dtype=np.float64)
     gate_um = float(gate_voxels) * sp
@@ -1310,9 +1324,9 @@ def measure_radii(
     old_by_sid: dict[int, np.ndarray] = {}
     arc_by_sid: dict[int, np.ndarray] = {}
     invented_by_sid: dict[int, np.ndarray] = {}
-    branch_context = _BranchContext.build(graph) if branch_aware else None
-    coords_ijk = {sid: frame.um_to_seg(graph.coords(sid)) for sid in graph.segment_ids()}
-    junction_scales = _junction_scales(graph, sp)
+    branch_context = cached('branches', lambda: _BranchContext.build(graph)) if branch_aware else None
+    coords_ijk = cached('coords', lambda: {sid: frame.um_to_seg(graph.coords(sid)) for sid in graph.segment_ids()})
+    junction_scales = cached('junction_scales', lambda: _junction_scales(graph, sp))
 
     sids = graph.segment_ids() if _segment_ids is None else list(_segment_ids)
     # Every geometric scale in the loop below -- the tangent-fit window, the cut
@@ -1338,7 +1352,7 @@ def measure_radii(
     n_passes = max(1, int(n_passes))
     scale_by_sid: dict[int, np.ndarray] = {}
     from .section_validation import SectionContext
-    section_context = SectionContext(graph) if branch_aware and section_filter else None
+    section_context = cached('sections', lambda: SectionContext(graph)) if branch_aware and section_filter else None
     pass_medians: list[float] = []
     if workers > 1:
         from .radius_parallel import measure_provisional

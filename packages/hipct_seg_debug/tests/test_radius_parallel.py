@@ -34,6 +34,26 @@ def fixture():
     return graph, frame, mask
 
 
+def test_provisional_batches_reuse_indexes_without_changing_measurements(monkeypatch):
+    from hipct_seg_debug.edit import section_validation
+    graph, frame, labels = fixture()
+    expected = [rp.measure_radii(graph, frame, labels, _raw_only=True,
+                _segment_ids=[sid], section_filter=True) for sid in [0, 1]]
+    constructor, calls = section_validation.SectionContext, []
+    def counted(g):
+        calls.append(1)
+        return constructor(g)
+    monkeypatch.setattr(section_validation, 'SectionContext', counted)
+    cache = {}
+    for sid, reference in zip([0, 1], expected):
+        actual = rp.measure_radii(graph, frame, labels, _raw_only=True,
+                    _segment_ids=[sid], section_filter=True, _worker_cache=cache)
+        assert_same(reference['result'], actual['result'])
+        for key in ('measured', 'source', 'reject', 'grew', 'modes', 'old', 'arc', 'invented'):
+            np.testing.assert_array_equal(actual[key][sid], reference[key][sid])
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("options", [
     {},
     dict(section_filter=True),

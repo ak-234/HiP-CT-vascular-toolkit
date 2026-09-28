@@ -12,6 +12,41 @@ For any package command, PowerShell users can instead set
 `$env:HIPCT_QUIET_DEPENDENCY_WARNINGS="1"` before launching it; remove that environment
 variable to restore the default. Neither option changes an already running process.
 
+## Runtime and exact reuse
+
+Refinement automatically reuses section observations for unchanged regions of an
+Amira lattice. Reuse requires identical target geometry, local scale and relevant
+point flags, plus unchanged geometry/radii for every potentially influencing
+vessel. Conservative bounds include the maximum section window, ownership volume,
+all candidate orientations and slab offsets. A neighbour entering the region or
+growing enough to reach it invalidates the entry. Rejected observations may also
+be reused; they remain rejected, never promoted to trusted support. Mutable array
+and live-edit inputs do not enable this cache.
+
+Progress records include `reused_section_segments`. Use `--no-section-cache` with
+`junction_qualification` or `refine-centreline` for an uncached comparison. Use a
+new output directory when changing run settings/code. Cache entries are local to
+one run and are not checkpointed.
+
+Decisive incident-branch rejection avoids unnecessary companion-plane work;
+read-only diagnostic tracing still examines all three planes. The first recorded
+rejection reason can consequently differ where a candidate has multiple faults,
+but an accepted section must still pass all checks. Backtracking reuses starting
+curve containment checks. Radius workers retain whole-tree indexes and bounded
+decoded row caches across provisional batches; those caches never cross a graph
+update. Refinement workers limit nested OpenCV/BLAS threads to avoid CPU contention.
+
+The earlier full-tree experiment required about 24.1 hours for refinement and
+3.2 hours for remeasurement with 24 workers. These are baseline timings, not a
+prediction for the optimised implementation. Five real-data midpoint probes,
+each run cold and warm, retained identical selected sections and rejection
+diagnostics in the before/after comparison. A full-tree speed-up factor has not
+yet been measured; savings depend on how many neighbourhoods remain unchanged.
+In a small full-context batch benchmark (two real segments, each measured twice),
+worker-state reuse reduced elapsed time from 15.54 to 5.08 seconds with identical
+provisional radii and rejection/source arrays. This isolates batch reuse and is
+not an estimate of the speed-up for a complete tree.
+
 ## Section validation
 
 `section_validation.py` is shared by centreline refinement and

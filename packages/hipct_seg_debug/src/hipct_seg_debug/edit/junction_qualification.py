@@ -96,6 +96,7 @@ def evaluate(args, target=None):
                            fixed_nodes=args.fixed_node, strength=.01,
                            max_iterations=args.max_iterations, max_samples=args.max_samples,
                            workers=args.workers,
+                           reuse_sections=not getattr(args, 'no_section_cache', False),
                            checkpoint=checkpoint,
                            section_progress=lambda row: print(json.dumps(dict(region=target,
                                stage='section_support', **row)), flush=True),
@@ -189,6 +190,8 @@ def main(argv=None):
     parser.add_argument('--segment', type=int, action='append', default=[])
     parser.add_argument('--fixed-node', type=int, action='append', default=[])
     parser.add_argument('--workers', type=int, default=8)
+    parser.add_argument('--no-section-cache', action='store_true',
+                        help='disable exact section reuse for benchmarking')
     parser.add_argument('--max-iterations', type=int, default=25)
     parser.add_argument('--max-samples', type=int, default=16)
     parser.add_argument('--cells-across-diameter', type=float, default=8.)

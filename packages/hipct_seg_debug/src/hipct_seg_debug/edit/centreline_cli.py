@@ -21,6 +21,8 @@ def add_parsers(sub, common, seg_common):
     p.add_argument("--max-half", type=int, default=256)
     p.add_argument("--max-samples", type=int, default=32)
     p.add_argument("--workers", type=int, default=1)
+    p.add_argument('--no-section-cache', action='store_true',
+                   help='disable exact section reuse for benchmarking')
     p.add_argument("--geometry-only", action="store_true",
                    help="retain radii as unmeasured placeholders instead of remeasuring")
     p.add_argument("--report-json", default=None)
@@ -54,6 +56,7 @@ def run(args):
             move_junctions=not args.fixed_junctions, strength=args.strength,
             max_iterations=args.max_iterations, max_half=args.max_half,
             max_samples=args.max_samples, workers=args.workers,
+            reuse_sections=not getattr(args, 'no_section_cache', False),
             progress=lambda row: print(json.dumps(row), flush=True),
         ).to_dict()
         if not args.geometry_only:

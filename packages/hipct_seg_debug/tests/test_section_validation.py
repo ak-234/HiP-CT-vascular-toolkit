@@ -163,3 +163,26 @@ def test_merged_incident_branch_is_not_partitioned_into_a_trusted_section(monkey
         spacing_um=10, max_half=35,
         validator=SectionContext(graph).validator(0, [1, 0, 0], sampler, frame))
     assert chosen is None
+
+
+def test_decisive_incident_rejection_skips_companions_but_trace_keeps_them(monkeypatch):
+    from .conftest_geometry import graph_from
+    from types import SimpleNamespace
+    graph = graph_from([(0, 0, 0), (100, 0, 0), (200, 0, 0), (100, 100, 0)],
+                       [(0, 1, 5, 10.), (1, 2, 5, 10.), (1, 3, 5, 10.)])
+    context = SectionContext(graph)
+    calls = []
+    def reject(*args):
+        calls.append(1)
+        return SectionVerdict(False, 'neighbouring_lumen_contamination', contaminants=[{'segment': 2}])
+    monkeypatch.setattr(context, 'validate', reject)
+    frame = make_frame((30, 30, 30))
+    c = SimpleNamespace(blob8=np.ones((3, 3), dtype='uint8'), blob4=np.ones((3, 3), dtype='uint8'))
+    args = ([c]*3, np.array([10., 10., 10.]), np.array([1., 0., 0.]), 5., (-.5, 0., .5), 20)
+    fast = context.validator(0, [1, 0, 0], None, frame).validate_slab(*args)
+    assert len(calls) == 1
+    calls.clear()
+    trace = []
+    full = context.validator(0, [1, 0, 0], None, frame, trace=trace.append).validate_slab(*args)
+    assert len(calls) == 3 and len(trace[0]['sections']) == 3
+    assert (fast.accepted, fast.reason) == (full.accepted, full.reason)

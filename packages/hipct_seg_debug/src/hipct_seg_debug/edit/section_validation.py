@@ -121,6 +121,10 @@ class SectionContext:
 
     def validator(self, sid, target_tangent, sampler, frame, diagnostics=None, trace=None):
         volume_cache = {}
+        segment = self.graph.segment(sid)
+        incident = set(self.graph.node_segments(segment['node1'])) | set(
+            self.graph.node_segments(segment['node2']))
+        prechecked = [None, None]
         def check(cut, ijk, normal):
             verdict = self.validate(sid, cut, frame.seg_to_um(np.asarray(ijk))[0], normal,
                                     target_tangent, sampler, frame)
@@ -128,16 +132,31 @@ class SectionContext:
                 diagnostics['max_target_obliquity_degrees'] = max(
                     diagnostics.get('max_target_obliquity_degrees', 0.), verdict.target_angle_degrees)
             return verdict
+        def prevalidate(cut, ijk, normal):
+            # Validation normalises its argument; do not alter the candidate
+            # before its remaining image planes have been sampled.
+            verdict = check(cut, ijk, np.asarray(normal).copy())
+            prechecked[:] = [cut, verdict]
+            if any(r['segment'] in incident for r in verdict.contaminants):
+                return verdict
+            # Non-incident ownership still requires the entire slab.
+            return SectionVerdict()
         def validate_slab(cuts, centre, normal, radius_vox, offsets, max_half):
-            verdicts = [check(c, centre+offset*radius_vox*normal, normal)
-                        for c, offset in zip(cuts, offsets)]
+            verdicts = [None]*len(cuts)
+            order = sorted(range(len(cuts)), key=lambda i: abs(offsets[i]))
+            for i in order:
+                verdicts[i] = (prechecked[1] if cuts[i] is prechecked[0] else
+                               check(cuts[i], centre+offsets[i]*radius_vox*normal, normal))
+                # An incident overlap makes this entire orientation ineligible.
+                # Further plane checks cannot rescue it. Tracing deliberately
+                # retains all planes for the diagnostic report.
+                if trace is None and any(r['segment'] in incident for r in verdicts[i].contaminants):
+                    return SectionVerdict(False, 'neighbouring_lumen_contamination',
+                                          contaminants=verdicts[i].contaminants)
             rivals = sorted({row['segment'] for verdict in verdicts
                              for row in verdict.contaminants})
             # An incident branch in the merged junction has no exclusive boundary.
             # Never manufacture its ownership using a watershed through the node.
-            segment = self.graph.segment(sid)
-            incident = set(self.graph.node_segments(segment['node1'])) | set(
-                self.graph.node_segments(segment['node2']))
             if trace is not None:
                 from ..crosssection import _perimeter_um
                 trace(dict(segment=int(sid), centre_ijk=np.asarray(centre).tolist(),
@@ -167,4 +186,6 @@ class SectionContext:
                 diagnostics['owned_slabs'] = diagnostics.get('owned_slabs', 0)+1
             return SectionVerdict(cuts=resolved)
         check.validate_slab = validate_slab
+        if trace is None:
+            check.prevalidate = prevalidate
         return check

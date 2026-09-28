@@ -69,6 +69,7 @@ def fit_cluster(graph, nodes, spans, observations, scales, sampler, frame, stren
                   spans={sid: [int(lo), int(hi)] for sid, (lo, hi) in spans.items()})
     if unsupported:
         return dict(report, status='insufficient_support')
+    original_bad = {sid: bad_edges(x, sampler, frame) for sid, x in old.items()}
     keys, coordinates, lookup, indices, fixed = {}, [], {}, {}, set()
     for sid, (lo, hi) in spans.items():
         seg = graph.segment(sid)
@@ -83,7 +84,7 @@ def fit_cluster(graph, nodes, spans, observations, scales, sampler, frame, stren
             local.append(keys[key])
             lookup[sid, int(i)] = keys[key]
         indices[sid] = np.array(local)
-        bad = bad_edges(old[sid], sampler, frame)
+        bad = original_bad[sid]
         immobile = np.r_[bad, False] | np.r_[False, bad]
         fixed.update(local[j] for j, i in enumerate(ids) if immobile[i])
         if lo > 0 or seg['node1'] not in nodes:
@@ -175,7 +176,8 @@ def fit_cluster(graph, nodes, spans, observations, scales, sampler, frame, stren
             candidate[sid][lo:hi+1] = trial[indices[sid]]
         after = objective(trial)
         reasons = {sid: reason for sid in spans
-                   if (reason := movement_rejection(old[sid], candidate[sid], sampler, frame))}
+                   if (reason := movement_rejection(old[sid], candidate[sid], sampler, frame,
+                                                    original_bad=original_bad[sid]))}
         uphill = not np.isfinite(after) or after > before+1e-9*max(1., before)
         if not uphill and not reasons:
             break

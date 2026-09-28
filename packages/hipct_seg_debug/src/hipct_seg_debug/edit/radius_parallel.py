@@ -30,15 +30,15 @@ def _init_worker(triple, frame, lattice, options):
         labels = open_lattice(path, field, dims, cache_dir=cache)
     else:
         labels = lattice
-    _WORKER = EditableGraph(triple), frame, labels, options
+    _WORKER = EditableGraph(triple), frame, labels, options, {}
 
 
 def _measure_batch(sids):
     from .radius_perimeter import measure_radii
 
-    graph, frame, labels, options = _WORKER
+    graph, frame, labels, options, cache = _WORKER
     return measure_radii(graph, frame, labels, _segment_ids=sids, _raw_only=True,
-                         **options)
+                         _worker_cache=cache, **options)
 
 
 def measure_provisional(graph, frame, labels, sids, *, workers, options, progress=None):

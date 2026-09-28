@@ -654,6 +654,13 @@ def stable_transverse_cut(
                 refused("insufficient_support" if c is None else "truncation")
                 failed = True
                 break
+            prevalidate = getattr(validator, 'prevalidate', None)
+            if slot == centre_slot and prevalidate is not None:
+                verdict = prevalidate(c, shifted, cand)
+                if not verdict.accepted:
+                    refused(verdict.reason)
+                    failed = True
+                    break
             if validator is not None and slab_validator is None:
                 verdict = validator(c, shifted, cand)
                 if not verdict.accepted:

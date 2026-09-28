@@ -73,11 +73,12 @@ def feasible_move(old, new, sampler, frame):
     return movement_rejection(old, new, sampler, frame) is None
 
 
-def movement_rejection(old, new, sampler, frame):
+def movement_rejection(old, new, sampler, frame, *, original_bad=None):
     """Explain a refused move without conflating containment and stationarity."""
     if not np.isfinite(new).all():
         return 'nonfinite_proposal'
-    original_bad = bad_edges(old, sampler, frame)
+    if original_bad is None:
+        original_bad = bad_edges(old, sampler, frame)
     if np.any(bad_edges(new, sampler, frame) & ~original_bad):
         return 'new_segmentation_exit'
     if original_bad.any():
@@ -245,6 +246,10 @@ _SECTION_WORKER = None
 
 
 def _init_section_worker(triple, frame, lattice, scale, max_half, max_samples, coherent):
+    import cv2
+    from threadpoolctl import threadpool_limits
+    threadpool_limits(limits=1)
+    cv2.setNumThreads(1)
     from .graphmodel import EditableGraph
     from ..rle import open_lattice
     global _SECTION_WORKER
@@ -328,7 +333,7 @@ def _targets(graph, sid, frame, sampler, ctx, scale, max_half, max_samples,
 def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
            fixed_nodes=(), move_junctions=True, strength=.1, max_iterations=25,
            max_half=256, max_samples=32, workers=1, progress=None,
-           section_progress=None, checkpoint=None):
+           section_progress=None, checkpoint=None, reuse_sections=True):
     """Refine selected segments with full-graph branch context, preserving radii.
 
     Junctions move only when every incident segment participates. Overlapping
@@ -362,12 +367,28 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
     segment_stable_rounds = {sid: 0 for sid in sids}
     from ..rle import ByteRLELattice, RawLattice
     process_sections = workers > 1 and isinstance(labels, (ByteRLELattice, RawLattice))
+    from .section_cache import SectionObservationCache
+    section_cache = (SectionObservationCache(sp, max_half)
+                     if reuse_sections and isinstance(labels, (ByteRLELattice, RawLattice)) else None)
     with ThreadPoolExecutor(max_workers=workers, initializer=_open_worker,
                             initargs=(labels, frame, local)) as pool:
         for iteration in range(max_iterations if method != "none" else 0):
-            ctx = None if process_sections else SectionContext(graph)
             before = {sid: graph.coords(sid).copy() for sid in sids}
             section_diagnostics = {sid: {} for sid in sids}
+            observations, pending = {}, []
+            if section_cache is not None:
+                section_cache.refresh(graph)
+            for sid in sids:
+                cached = section_cache.get(sid, scale[sid]) if section_cache is not None else None
+                if cached is None:
+                    pending.append(sid)
+                else:
+                    observations[sid], section_diagnostics[sid] = cached
+                    if section_progress:
+                        section_progress(dict(iteration=iteration+1, segment=sid,
+                            accepted_sections=len(observations[sid][2]), seconds=0., cached=True))
+            cache_hits = len(observations)
+            ctx = SectionContext(graph) if pending and not process_sections else None
 
             def work(sid):
                 if len(before[sid]) < 4:
@@ -376,15 +397,14 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                                      max_half, max_samples, method == "centroid-coherent",
                                      diagnostics=section_diagnostics[sid])
 
-            if process_sections and sids:
+            if process_sections and pending:
                 lattice = (labels.path, labels.field, labels.dims, getattr(labels, '_cache_dir', None))
-                with ProcessPoolExecutor(max_workers=min(workers, len(sids)),
+                with ProcessPoolExecutor(max_workers=min(workers, len(pending)),
                         mp_context=multiprocessing.get_context('spawn'),
                         initializer=_init_section_worker,
                         initargs=(graph.triple, frame, lattice, scale, max_half, max_samples,
                                   method == 'centroid-coherent')) as processes:
-                    observations = {}
-                    futures = [processes.submit(_section_work, sid) for sid in sids]
+                    futures = [processes.submit(_section_work, sid) for sid in pending]
                     for future in as_completed(futures):
                         sid, result, diagnostics, seconds = future.result()
                         observations[sid] = result
@@ -392,8 +412,11 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                         if section_progress:
                             section_progress(dict(iteration=iteration+1, segment=sid,
                                                   accepted_sections=len(result[2]), seconds=seconds))
-            else:
-                observations = dict(pool.map(work, sids))
+            elif pending:
+                observations.update(pool.map(work, pending))
+            if section_cache is not None:
+                for sid in pending:
+                    section_cache.put(sid, observations[sid], section_diagnostics[sid])
             # Internal unsupported links can be fitted from exclusive sections on
             # the external approaches of a jointly solved junction cluster.
             node_targets = {}
@@ -478,10 +501,12 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                     target, weights = observations[sid][:2]
                     initial_cost = fit_objective(interior_before[sid], target, weights, scale[sid],
                                                  interior_before[sid], sp, strength)
+                    original_bad = bad_edges(interior_before[sid], sampler, frame)
                     while alpha >= 1/256:
                         trial = {sid: interior_before[sid]+alpha*(proposals[sid]-interior_before[sid])
                                  for sid in group}
-                        reason = movement_rejection(interior_before[sid], trial[sid], sampler, frame)
+                        reason = movement_rejection(interior_before[sid], trial[sid], sampler, frame,
+                                                    original_bad=original_bad)
                         cost = fit_objective(trial[sid], target, weights, scale[sid],
                                              interior_before[sid], sp, strength)
                         if reason is None and cost > initial_cost+1e-9*max(1., initial_cost):
@@ -505,6 +530,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
             peak = float(max(moves, default=0.))
             report.iterations = iteration+1
             report.history.append(dict(iteration=iteration+1, max_move_um=peak,
+                                       reused_section_segments=cache_hits,
                                        accepted_sections=accepted_total, blocked_segments=blocked,
                                        oscillating_segments=oscillations,
                                        changed_support_segments=support_changes))
