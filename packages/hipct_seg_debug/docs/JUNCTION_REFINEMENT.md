@@ -5,6 +5,13 @@ anatomical accuracy on a real tree. Keep the input, measured and reconstruction
 graphs in separate files. A geometry-only graph retains placeholder radii and
 must be remeasured before reconstruction.
 
+Add `--quiet-dependency-warnings` to the `junction_qualification` command to hide
+the known Paramiko TripleDES/Blowfish import deprecations in the parent and worker
+processes. Geometry, numerical and other dependency warnings remain visible.
+For any package command, PowerShell users can instead set
+`$env:HIPCT_QUIET_DEPENDENCY_WARNINGS="1"` before launching it; remove that environment
+variable to restore the default. Neither option changes an already running process.
+
 ## Section validation
 
 `section_validation.py` is shared by centreline refinement and

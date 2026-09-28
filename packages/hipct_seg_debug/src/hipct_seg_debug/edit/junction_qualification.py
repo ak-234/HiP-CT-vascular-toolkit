@@ -181,6 +181,8 @@ def evaluate(args, target=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--quiet-dependency-warnings', action='store_true',
+                        help='hide known Paramiko cipher deprecations, including in workers')
     parser.add_argument('--graph', required=True)
     parser.add_argument('--seg', required=True)
     parser.add_argument('--out-dir', required=True)
@@ -199,6 +201,9 @@ def main(argv=None):
     parser.add_argument('--geometry-only', action='store_true',
                         help='checkpoint a geometry experiment without starting radius or surface work')
     args = parser.parse_args(argv)
+    if args.quiet_dependency_warnings:
+        from .._dependency_warnings import quiet_dependency_warnings
+        quiet_dependency_warnings()
     if not args.segment and not args.experimental_full_tree:
         parser.error('provide the known failure regions and untouched controls with --segment')
     if args.experimental_full_tree and (args.full_tree or args.segment):
@@ -217,7 +222,8 @@ def main(argv=None):
         for path in sorted(root.rglob('*.py')):
             code.update(str(path.relative_to(root)).encode())
             code.update(path.read_bytes())
-    manifest = dict(options=vars(args), graph=fingerprint(args.graph), segmentation=fingerprint(args.seg),
+    run_options = {key: value for key, value in vars(args).items() if key != 'quiet_dependency_warnings'}
+    manifest = dict(options=run_options, graph=fingerprint(args.graph), segmentation=fingerprint(args.seg),
                     code_sha256=code.hexdigest())
     if (out/'manifest.json').exists() and json.loads((out/'manifest.json').read_text()) != manifest:
         raise ValueError('checkpoint inputs, code or options changed; use a new output directory')
