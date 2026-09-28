@@ -50,6 +50,35 @@ def test_preexisting_gap_movement_reports_constraint_not_convergence():
     assert cr.movement_rejection(x, changed, _PlaneSampler(mask, frame), frame) == 'preexisting_gap_anchor_moved'
 
 
+@pytest.mark.parametrize('unsupported', [True, False])
+def test_junction_and_approaches_move_together_or_remain_unresolved(monkeypatch, unsupported):
+    frame = make_frame((70, 110, 110))
+    graph = graph_from([(500, 530, 300), (100, 500, 300), (900, 500, 300), (500, 900, 300)],
+                       [(0, 1, 25, 50.), (0, 2, 25, 50.), (0, 3, 25, 50.)])
+    before = {sid: graph.coords(sid).copy() for sid in graph.segment_ids()}
+    def observations(g, sid, *args, **kwargs):
+        x = g.coords(sid).copy()
+        if sid == 2 and unsupported:
+            return x, np.zeros(len(x)), [], []
+        x[:, 1] = before[sid][:, 1]-30*np.linspace(1, 0, len(x))
+        return x, np.ones(len(x)), list(range(len(x))), [50.]*len(x)
+    monkeypatch.setattr(cr, '_targets', observations)
+    report = cr.refine(graph, frame, np.ones((70, 110, 110), dtype='uint8'),
+                       method='centroid-coherent', max_iterations=2)
+    if not unsupported:
+        assert np.linalg.norm(graph.coords(0)[0]-before[0][0]) > 1.
+        for sid in before:
+            np.testing.assert_array_equal(graph.coords(sid)[0], graph.coords(0)[0])
+            np.testing.assert_array_equal(graph.coords(sid)[-1], before[sid][-1])
+            np.testing.assert_array_equal(graph.radii(sid), np.full(25, 50.))
+        return
+    assert not report.converged
+    assert report.neighbourhoods[0]['status'] == 'insufficient_support'
+    for sid, old in before.items():
+        np.testing.assert_array_equal(graph.coords(sid), old)
+        assert report.segments[sid]['blocked_reason'] == 'junction_fit_unresolved'
+
+
 def test_compressed_section_processes_match_serial_fitting(tmp_path):
     import copy
     from hipct_seg_debug import rle_write, amira, rle

@@ -67,6 +67,20 @@ def test_axial_continuation_has_finite_flat_end_support():
     assert verdict.accepted
 
 
+@pytest.mark.xfail(strict=True, reason='Known defect: a subvoxel endpoint kink extends a foreign tube backwards')
+def test_noisy_axial_continuation_must_not_contaminate_upstream_plane():
+    frame = make_frame((64, 100, 100))
+    z, y, x = np.ogrid[:64, :100, :100]
+    labels = np.broadcast_to((y-50)**2+(z-30)**2 <= 4**2, (64, 100, 100)).astype('uint8')
+    graph = branches([np.array([[10, 50, 30], [60, 50, 30]])*10.,
+                      np.array([[60, 50, 30], [60.1, 50.5, 30], [90, 50, 30]])*10.], [40., 200.])
+    sampler = _PlaneSampler(labels, frame)
+    c = cut(sampler, [50, 50, 30], [1, 0, 0], 25, max_half=45)
+    verdict = SectionContext(graph).validate(0, c, np.array([500., 500., 300.]),
+                                             [1, 0, 0], [1, 0, 0], sampler, frame)
+    assert verdict.accepted
+
+
 def test_every_alternative_plane_passes_validator():
     frame = make_frame((30, 30, 60))
     z, y, x = np.ogrid[:30, :30, :60]
@@ -81,6 +95,23 @@ def test_every_alternative_plane_passes_validator():
     assert chosen is None
     assert len(calls) == 9
     assert diagnostics['neighbouring_lumen_contamination'] == 9
+
+
+def test_debug_trace_retains_exclusive_slab_and_does_not_modify_graph():
+    from hipct_seg_debug.edit.section_debug import inspect_section
+    frame = make_frame((30, 30, 60))
+    z, y, x = np.ogrid[:30, :30, :60]
+    labels = np.broadcast_to((y-15)**2+(z-15)**2 <= 5**2, (30, 30, 60)).astype('uint8')
+    line = np.c_[np.linspace(50, 550, 21), np.full(21, 150.), np.full(21, 150.)]
+    graph = branches([line], [50.])
+    before, radii = graph.coords(0).copy(), graph.radii(0).copy()
+    row = inspect_section(graph, 0, 10, frame, _PlaneSampler(labels, frame), SectionContext(graph))
+    assert row['accepted'] and row['status'] == 'diagnostic_only'
+    assert len(row['candidate_slabs']) == 1
+    assert len(row['candidate_slabs'][0]['sections']) == 3
+    assert row['candidate_slabs'][0]['sections'][1]['perimeter_um'] == pytest.approx(row['selected']['perimeter_um'])
+    np.testing.assert_array_equal(graph.coords(0), before)
+    np.testing.assert_array_equal(graph.radii(0), radii)
 
 
 @pytest.mark.parametrize('reverse,reorder', [(False, False), (True, False), (True, True)])

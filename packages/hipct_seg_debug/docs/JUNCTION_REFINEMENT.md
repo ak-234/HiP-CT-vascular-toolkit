@@ -158,3 +158,39 @@ steps, radius provenance, infeasible collisions, and actual junction meshes.
 The latest implementation still requires regional qualification and anatomical
 overlay review. No full-tree geometry-refined and remeasured reconstruction has
 been accepted or published as a corrected result.
+
+## Endpoint bowing and rejected-section investigation, 2026-09-28
+
+The experimental full-tree run completed 25 refinement iterations and all radius
+measurements, but did not converge. Segment 3717 retained both original endpoints
+while its interior moved by up to 1.036 mm. Segments 3655 and 3612 did not move;
+their neighbouring segments accumulated substantial interior movement with fixed
+ends. Independent interior acceptance before a failed junction solve could retain
+these bowed curves. These outputs are not accepted anatomical corrections.
+
+Refinement now solves shared junctions and approach curves first. Independent
+interior fitting preserves the accepted junction spans exactly, including their
+approach tangents. Segments in unresolved neighbourhoods defer independent
+interior fitting. This prevents that partial-update failure; it does not supply
+missing section support or prove that a junction is anatomically centred. New
+regional experiments start from the pre-refinement graph, not the bowed output.
+
+Read-only rejection tracing is available through
+`python -m hipct_seg_debug.edit.section_debug --graph INPUT --seg LABELS
+--segment ID --out-dir OUTPUT`. JSON includes each completed candidate slab,
+incident rivals, unpartitioned area/perimeter, and the exact foreign edge,
+foreground witness, axis distance and radius that triggered contamination.
+`--point INDEX` selects individual points. `--slab-half-span FRACTION` is only a
+sensitivity experiment and never writes a corrected graph.
+
+Two unresolved issues are documented by that investigation:
+
+- Finite foreign tubes use individual sampled edge directions. A synthetic axial
+  continuation with a half-voxel endpoint kink falsely contaminates an upstream
+  plane, while the straight version passes. A strict expected-failure regression
+  records this defect until finite branch support is made robust to point noise.
+- Reducing the slab half-span from 0.5 to 0.125 input radii recovered one section
+  on 3655, but its ownership partition retained only 49.1% of the unpartitioned
+  perimeter at the **same orientation** (3877 versus 7892 micrometres). Stability
+  alone therefore cannot establish anatomically correct ownership. No shortened
+  slab default or relaxed contamination threshold has been adopted.

@@ -65,7 +65,8 @@ def fit_cluster(graph, nodes, spans, observations, scales, sampler, frame, stren
     unsupported = [sid for sid in spans if not {
         graph.segment(sid)['node1'], graph.segment(sid)['node2']} <= nodes
         and len(observations[sid][2]) < 2]
-    report = dict(nodes=sorted(nodes), segments=sorted(spans), unsupported_approaches=unsupported)
+    report = dict(nodes=sorted(nodes), segments=sorted(spans), unsupported_approaches=unsupported,
+                  spans={sid: [int(lo), int(hi)] for sid, (lo, hi) in spans.items()})
     if unsupported:
         return dict(report, status='insufficient_support')
     keys, coordinates, lookup, indices, fixed = {}, [], {}, {}, set()

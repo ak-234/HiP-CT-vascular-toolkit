@@ -106,6 +106,10 @@ class SectionContext:
                 if np.all(sampler.at(line_samples_ijk(p, q)) > 0):
                     contaminated[other] = dict(
                         segment=int(other), normal_tangent_alignment=float(abs(normal @ direction)),
+                        edge_start_um=a.tolist(), edge_end_um=b.tolist(),
+                        overlap_point_um=points[ids[j]].tolist(),
+                        branch_axis_point_um=centre[j].tolist(),
+                        branch_radius_um=float(radius[j]), axis_distance_um=float(distance[j]),
                         tangent_plane_angle_degrees=float(np.degrees(np.arcsin(
                             np.clip(abs(normal @ direction), 0, 1)))))
                     break
@@ -115,7 +119,7 @@ class SectionContext:
             verdict.contaminants = [contaminated[k] for k in sorted(contaminated)]
         return verdict
 
-    def validator(self, sid, target_tangent, sampler, frame, diagnostics=None):
+    def validator(self, sid, target_tangent, sampler, frame, diagnostics=None, trace=None):
         volume_cache = {}
         def check(cut, ijk, normal):
             verdict = self.validate(sid, cut, frame.seg_to_um(np.asarray(ijk))[0], normal,
@@ -129,15 +133,25 @@ class SectionContext:
                         for c, offset in zip(cuts, offsets)]
             rivals = sorted({row['segment'] for verdict in verdicts
                              for row in verdict.contaminants})
-            if not rivals:
-                return next((v for v in verdicts if not v.accepted), SectionVerdict())
             # An incident branch in the merged junction has no exclusive boundary.
             # Never manufacture its ownership using a watershed through the node.
             segment = self.graph.segment(sid)
             incident = set(self.graph.node_segments(segment['node1'])) | set(
                 self.graph.node_segments(segment['node2']))
+            if trace is not None:
+                from ..crosssection import _perimeter_um
+                trace(dict(segment=int(sid), centre_ijk=np.asarray(centre).tolist(),
+                           normal=np.asarray(normal).tolist(), radius_vox=float(radius_vox),
+                           offsets=list(offsets), incident_rivals=sorted(incident.intersection(rivals)),
+                           sections=[dict(offset=float(offset), area_vox=int(c.blob8.sum()),
+                                          perimeter_um=float(_perimeter_um(c.blob4, float(frame.seg_spacing[0]))),
+                                          contaminants=v.contaminants, reason=v.reason)
+                                     for c, v, offset in zip(cuts, verdicts, offsets)]))
+            if not rivals:
+                return next((v for v in verdicts if not v.accepted), SectionVerdict())
             if incident.intersection(rivals):
-                return SectionVerdict(False, 'neighbouring_lumen_contamination')
+                return SectionVerdict(False, 'neighbouring_lumen_contamination',
+                                      contaminants=[r for v in verdicts for r in v.contaminants])
             from .radius_perimeter import _resolve_owned_slab
             coords = {other: frame.um_to_seg(self.graph.coords(other)) for other in [sid, *rivals]}
             resolved = _resolve_owned_slab(

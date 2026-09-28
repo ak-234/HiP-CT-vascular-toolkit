@@ -403,50 +403,69 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                                 if nid not in held and graph.degree(nid) >= 2
                                 and set(graph.node_segments(nid)) <= selected}
 
-            proposals = {}
-            accepted_total = 0
+            from .junction_refine import fit_objective, refine_neighbourhoods
             for sid in sids:
                 x = before[sid]
                 target, weights, good, measured = observations[sid]
-                accepted_total += len(good)
                 if measured:
-                    scale[sid] = np.maximum(2*sp, np.interp(
-                        arclength(x), arclength(x)[good], measured))
+                    scale[sid] = np.maximum(2*sp, np.interp(arclength(x), arclength(x)[good], measured))
+                if len(good) >= 2 and method.startswith('centroid-'):
+                    residual = np.linalg.norm(target-x, axis=1)
+                    typical = max(sp, float(np.median(residual[weights > 0])))
+                    weights *= np.minimum(1., 2*typical/np.maximum(residual, sp))
+            # Solve shared junctions BEFORE independent interiors. Failed joint
+            # fits must not leave bowed interiors attached to unchanged nodes.
+            deferred, junction_pins = set(), {sid: set() for sid in sids}
+            if method.startswith('centroid-') and move_junctions:
+                with graph.batch('joint junction and approach fitting'):
+                    report.neighbourhoods = refine_neighbourhoods(
+                        graph, node_targets, observations, scale, sampler, frame, strength)
+                for row in report.neighbourhoods.values():
+                    if row['status'] not in ('moving', 'stationary'):
+                        deferred.update(row['segments'])
+                    else:
+                        for sid, (lo, hi) in row['spans'].items():
+                            junction_pins[sid].update(range(lo, hi+1))
+            interior_before = {sid: graph.coords(sid).copy() for sid in sids}
+            proposals = {}
+            accepted_total = 0
+            for sid in sids:
+                x = interior_before[sid]
+                target, weights, good, measured = observations[sid]
+                accepted_total += len(good)
                 report.segments[sid] = dict(accepted_sections=len(good),
                                             sampled_points=min(len(x), max_samples),
                                             section_diagnostics=section_diagnostics[sid],
                                             section_scale_um=float(np.median(scale[sid])))
-                if len(good) < 2 or len(x) < 4:
+                if sid in deferred:
+                    report.segments[sid]['blocked_reason'] = 'junction_fit_unresolved'
+                if sid in deferred or len(good) < 2 or len(x) < 4:
                     proposals[sid] = x.copy()
                     continue
                 if method.startswith("centroid-"):
-                    # Huber reweighting in voxel units avoids one centroid dominating.
-                    residual = np.linalg.norm(target-x, axis=1)
-                    # The first pass must be able to correct a sustained large offset.
-                    typical = max(sp, float(np.median(residual[weights > 0])))
-                    weights *= np.minimum(1., 2*typical/np.maximum(residual, sp))
                     bad = bad_edges(x, sampler, frame)
                     pinned = np.flatnonzero(np.r_[bad, False] | np.r_[False, bad])
                     report.segments[sid]['gap_anchor_points'] = len(pinned)
+                    pinned = sorted(set(pinned) | junction_pins[sid])
                     proposals[sid] = spline_fit(x, target, weights, scale[sid], sp,
                                                 strength, fixed_points=pinned)
                 else:
                     proposals[sid] = laplacian_fit(x, scale[sid], sp,
                                                    taubin=method == "taubin", strength=strength)
 
-            # Smooth interiors with fixed endpoints before joint node fitting.
+            # Smooth only the remaining interiors, retaining jointly fitted
+            # approach positions and tangents exactly.
             groups = [{sid} for sid in sids]
-            from .junction_refine import fit_objective, refine_neighbourhoods
             moves = []
             blocked = 0
             oscillations = 0
             support_changes = 0
             changed_support = set()
-            blocked_ids = set()
+            blocked_ids = set(deferred)
             with graph.batch("segmentation-constrained centreline refinement"):
                 for group in groups:
                     sid = next(iter(group))
-                    delta = proposals[sid]-before[sid]
+                    delta = proposals[sid]-interior_before[sid]
                     previous = previous_moves.get(sid)
                     oscillating = previous is not None and np.sum(delta*previous) < 0
                     oscillations += int(oscillating)
@@ -457,14 +476,14 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                         changed_support.add(sid)
                     previous_support[sid] = support
                     target, weights = observations[sid][:2]
-                    initial_cost = fit_objective(before[sid], target, weights, scale[sid],
-                                                 before[sid], sp, strength)
+                    initial_cost = fit_objective(interior_before[sid], target, weights, scale[sid],
+                                                 interior_before[sid], sp, strength)
                     while alpha >= 1/256:
-                        trial = {sid: before[sid]+alpha*(proposals[sid]-before[sid])
+                        trial = {sid: interior_before[sid]+alpha*(proposals[sid]-interior_before[sid])
                                  for sid in group}
-                        reason = movement_rejection(before[sid], trial[sid], sampler, frame)
+                        reason = movement_rejection(interior_before[sid], trial[sid], sampler, frame)
                         cost = fit_objective(trial[sid], target, weights, scale[sid],
-                                             before[sid], sp, strength)
+                                             interior_before[sid], sp, strength)
                         if reason is None and cost > initial_cost+1e-9*max(1., initial_cost):
                             reason = 'objective_increase'
                         if reason is None:
@@ -477,16 +496,9 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                         continue
                     for sid in sorted(group):
                         moves.extend(np.linalg.norm(trial[sid]-before[sid], axis=1))
-                        previous_moves[sid] = trial[sid]-before[sid]
+                        previous_moves[sid] = trial[sid]-interior_before[sid]
                         graph.set_segment_coords(sid, trial[sid])
-                if method.startswith("centroid-") and move_junctions:
-                    neighbourhoods = refine_neighbourhoods(
-                        graph, node_targets, observations, scale, sampler, frame, strength)
-                    report.neighbourhoods = neighbourhoods
-                    for row in neighbourhoods.values():
-                        if row['status'] == 'blocked':
-                            blocked_ids.update(row['segments'])
-                    blocked = len(blocked_ids)
+                blocked = len(blocked_ids)
                 # Include shared-node and neighbourhood movement in convergence.
                 moves = [float(np.linalg.norm(graph.coords(sid)-before[sid], axis=1).max())
                          for sid in sids if len(before[sid])]
