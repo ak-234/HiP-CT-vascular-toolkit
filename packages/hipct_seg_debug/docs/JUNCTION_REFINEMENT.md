@@ -49,6 +49,40 @@ not an estimate of the speed-up for a complete tree.
 
 ## Section validation
 
+### DFS regional experiment (2026-09-29)
+
+The opt-in `dfs-centroid` experiment ran two iterations with eight section stations
+per segment and eight measurement workers on complete neighbourhoods of 3717,
+3612/3655, plus untouched controls 318 and 4390. Internal nodes moved jointly:
+endpoint displacements were approximately 160/159 um for 3717, 142/191 um for
+3612 and 65/224 um for 3655. No region added segmentation exits; existing outside
+edge counts remained 9, 5, 1 and 7 respectively. These are short geometry tests,
+not converged or anatomically qualified reconstructions. Radii were preserved as
+placeholders and have not been remeasured on these new curves.
+
+The second 3717 iteration rejected its primary path proposal because an incident
+approach on segment 3041 would leave the segmentation. Other rejected approaches
+included 3339, 3400 and 3551. The objective decreased, so these are containment
+failures rather than uphill-objective failures. Projected section overlays still
+show residual centre offsets. Resolve these constraints before promoting the
+method to a full-tree reconstruction; reducing a visual bulge is not sufficient.
+
+Skipping repeated, identical failed regional prefixes retained exactly the same
+first-iteration coordinates while reducing fitting attempts from 94 to 28. Observed
+iteration time changed from 196.9 to 171.2 seconds; this is not a full-tree speed
+benchmark. The updated two-iteration 3717 geometry run took 306.0 seconds.
+
+The separate `dfs-confidence` profile experiment on the completed v5 measurements
+filled unsupported samples on 3717 and 3612. Segment 3655 remained unresolved:
+its bracketing anchors were 3600.5 um apart, exceeding the default 3157.8 um local
+transition limit. Trusted measurements were retained. This profile experiment
+does not qualify the v5 geometry or replace remeasurement after DFS refinement.
+
+See [CENTRELINE_REFINEMENT.md](CENTRELINE_REFINEMENT.md) for the opt-in commands,
+saved path ordering, interpolation limits and provenance fields.
+
+### Shared section checks
+
 `section_validation.py` is shared by centreline refinement and
 `radius-perimeter --section-filter`. It checks finite branch extent, local calibre,
 overlap with the selected segmentation component, and foreground connections to
