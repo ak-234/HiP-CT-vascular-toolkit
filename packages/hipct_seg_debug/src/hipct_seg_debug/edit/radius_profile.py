@@ -10,6 +10,7 @@ from .centreline_refine import arclength
 from .radius_perimeter import ACCEPTED, FILLED
 
 UNCHANGED, GAP, CONTINUATION, CONFLICT, UNSUPPORTED, JUNCTION_EXTENSION = range(6)
+DFS_INTERPOLATION = 6
 
 
 @dataclass
@@ -20,6 +21,7 @@ class ProfileReport:
     unsupported_segments: list = field(default_factory=list)
     junctions: list = field(default_factory=list)
     discontinuities: list = field(default_factory=list)
+    paths: list = field(default_factory=list)
     status: str = "prepared"
 
     def to_dict(self):
@@ -60,9 +62,10 @@ def interpolate_supported(s, radius, trusted):
     return out, changed
 
 
-def prepare_profile(graph, *, policy="preserve", spacing_um=1., transition_radii=4.):
-    if policy not in ('preserve', 'confidence'):
-        raise ValueError('radius profile must be preserve or confidence')
+def prepare_profile(graph, *, policy="preserve", spacing_um=1., transition_radii=4., root_nodes=(),
+                    path_plan=None):
+    if policy not in ('preserve', 'confidence', 'dfs-confidence'):
+        raise ValueError('radius profile must be preserve, confidence or dfs-confidence')
     if spacing_um <= 0 or transition_radii <= 0:
         raise ValueError('profile lengths must be positive')
     report = ProfileReport(policy)
@@ -75,7 +78,7 @@ def prepare_profile(graph, *, policy="preserve", spacing_um=1., transition_radii
     derived = {sid: r.copy() for sid, r in raw.items()}
     trusted = {sid: trusted_radii(graph, sid) for sid in raw}
     reasons = {sid: np.zeros(len(r), dtype=int) for sid, r in raw.items()}
-    if policy == 'confidence':
+    if policy in ('confidence', 'dfs-confidence'):
         for sid in raw:
             s = arclength(graph.coords(sid))
             relative = np.abs(np.diff(np.log(np.maximum(raw[sid], 1e-12))))
@@ -157,7 +160,18 @@ def prepare_profile(graph, *, policy="preserve", spacing_um=1., transition_radii
             if not np.isclose(derived[a][ia[-1]], derived[b][ib[0]], rtol=1e-8):
                 report.conflicts.append(dict(node=nid, segments=incident,
                                              reason='unsupported_continuation'))
-    if policy == 'confidence':
+    if policy == 'dfs-confidence':
+        from .dfs_profile import apply_path_profiles
+        apply_path_profiles(graph, raw, trusted, derived, reasons, report,
+            roots=root_nodes, spacing_um=spacing_um, transition_radii=transition_radii,
+            reason_code=DFS_INTERPOLATION, path_plan=path_plan)
+        # A path can resolve a degree-two join whose individual segments lacked
+        # anchors. Trusted conflicts remain visible and are never averaged.
+        report.conflicts = [row for row in report.conflicts
+            if row['reason'] != 'unsupported_continuation' or not np.isclose(
+                *[derived[sid][0 if graph.segment(sid)['node1'] == row['node'] else -1]
+                  for sid in row['segments']], rtol=1e-8)]
+    if policy in ('confidence', 'dfs-confidence'):
         report.unsupported_segments = [sid for sid in raw if np.any(
             ~trusted[sid] & np.isin(reasons[sid], [UNCHANGED, UNSUPPORTED]))]
     attrs = graph.triple.point_attrs

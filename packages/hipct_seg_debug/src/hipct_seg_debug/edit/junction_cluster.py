@@ -49,11 +49,14 @@ def neighbourhood_clusters(graph, nodes, observations, scales, spacing):
             for group in groups.values()]
 
 
-def fit_cluster(graph, nodes, spans, observations, scales, sampler, frame, strength):
+def fit_cluster(graph, nodes, spans, observations, scales, sampler, frame, strength,
+                *, require_external_support=True):
     """One quadratic solve with shared node variables and fixed outer tangents.
 
     Unsupported internal links receive support through both jointly fitted nodes.
-    Every external approach must supply two exclusive sections. Branch directions
+    By default every external approach must supply two exclusive sections. DFS
+    callers may relax this after checking support along the through path; missing
+    side-approach support is still reported. Branch directions
     have separate soft derivative observations; degree-two derivatives are shared
     exactly by a linear equality constraint. A single containment line search
     accepts or refuses the entire neighbourhood.
@@ -67,7 +70,7 @@ def fit_cluster(graph, nodes, spans, observations, scales, sampler, frame, stren
         and len(observations[sid][2]) < 2]
     report = dict(nodes=sorted(nodes), segments=sorted(spans), unsupported_approaches=unsupported,
                   spans={sid: [int(lo), int(hi)] for sid, (lo, hi) in spans.items()})
-    if unsupported:
+    if unsupported and require_external_support:
         return dict(report, status='insufficient_support')
     original_bad = {sid: bad_edges(x, sampler, frame) for sid, x in old.items()}
     keys, coordinates, lookup, indices, fixed = {}, [], {}, {}, set()
@@ -105,7 +108,9 @@ def fit_cluster(graph, nodes, spans, observations, scales, sampler, frame, stren
         ids = np.arange(lo, hi+1)
         s = arclength(old[sid][ids])
         ds = np.diff(s)
-        if len(ds) < 2 or np.any(ds <= 1e-9):
+        # A two-point link has no interior curvature term, but is a valid
+        # connection between jointly fitted nodes. Reject only zero-length spans.
+        if len(ds) < 1 or np.any(ds <= 1e-9):
             return dict(report, status='insufficient_support', reason='degenerate_span')
         q = np.r_[ds[0]/2, (ds[:-1]+ds[1:])/2, ds[-1]/2]
         v = indices[sid]

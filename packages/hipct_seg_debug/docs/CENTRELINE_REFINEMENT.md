@@ -29,6 +29,7 @@ invent a connection through background.
 | `none` | Unmodified reference geometry |
 | `centroid-spline` | Confidence-weighted cubic fit to section centroids, using the radius estimator's section orientation search |
 | `centroid-coherent` | Same fit, but retains the fitted curve's normal when its section passes stability checks; searches alternatives only when it fails |
+| `dfs-centroid` | Fits root-to-terminal paths longest first, with shared movable internal nodes and bounded joint fitting at later branch attachments |
 | `laplacian` | Implicit diffusion using physical edge lengths and locally measured section scales |
 | `taubin` | Shrinkage-compensated implicit Laplacian, using `2H-H²` for the implicit filter `H` |
 
@@ -57,6 +58,57 @@ Non-convergence, insufficient support, blocked moves and pre-existing outside
 edges are reported. No new method has been promoted into `optimise-skeleton`.
 
 ## Optional reconstruction layout
+
+### Longest-path-first experiment
+
+```powershell
+py -3.12 -m hipct_seg_debug.edit refine-centreline graph.am --seg labels.am --method dfs-centroid --roots-json roots.json --strength 0.01 --workers 8 --out dfs_measured.am
+py -3.12 -m hipct_seg_debug.edit prepare-reconstruction dfs_measured.am --seg labels.am --radius-profile dfs-confidence --path-plan-json dfs_measured.am.report.json --skip-clearance --out dfs_reconstruction.am
+```
+
+Use the same roots for both stages. Repeated `--root-node ID` is an alternative to
+a root sidecar. `--path-plan-json` reuses the refinement report's roots and original
+path ordering, verifying graph topology before use. Without a saved plan the
+profile ranks paths using the current geometry, which can change the order of
+similarly long paths. Without explicit roots, the existing automatic root heuristic is
+used; the geometry report records the complete initial path plan. Paths are ranked
+by physical arclength once, with deterministic ID tie breaks. Cycles and multiple
+explicit roots in one component are refused rather than silently pruning topology.
+
+Each refinement iteration fits the longest path, then the unfitted suffix of each
+remaining path. Earlier geometry is fixed outside a bounded attachment region;
+all incident approaches inside it participate in the shared-node solve. Roots,
+terminals and regional boundary nodes remain fixed. The solve uses section-centroid
+observations and a calibre-scaled bending penalty, followed by objective and
+containment checks. Degree-two derivatives are coupled. Unsupported daughters do
+not veto a supported through path, but remain explicitly unsupported in the report.
+Two-point internal links can receive support from accepted sections on both sides.
+This experimental method does not establish that the longest path is the anatomical
+main vessel. Compare the recorded path order and segmentation overlays.
+
+`dfs-confidence` extends the existing `confidence` profile across segment boundaries
+along the first path that owns each segment. It interpolates rejected/unmeasured
+spans in log radius with shape-preserving cubic interpolation. Trusted measurements,
+including supported narrowing, remain unchanged. A later daughter uses its own
+anchors and the existing bounded branch-local endpoint extension; it does not
+inherit a parent radius. Conflicting trusted joint records are not averaged.
+
+Cross-segment anchor separation is limited to `--transition-radii` (default 4)
+times the smaller anchor radius, with a minimum of eight voxels. Longer gaps remain
+unresolved in `paths[].rejected_spans`. Existing within-segment confidence filling
+is unchanged. Mere proximity to a bifurcation does not invalidate an accepted
+measurement: remeasure with the shared section filter to identify contaminated
+sections first. This avoids replacing a supported calibre increase with a guessed
+radius. Original measurements stay in `radius_measured_um`; path-derived values
+have `radius_adjustment_reason = 6`. Profiles are reconstruction inputs, not new
+measurements. The compatibility default remains `preserve`.
+
+For checkpointed regional geometry comparisons, add `--method dfs-centroid` and
+the same root options to `python -m hipct_seg_debug.edit.junction_qualification`.
+That qualification pipeline still uses its established `confidence` reconstruction
+profile; use `prepare-reconstruction` explicitly to compare `dfs-confidence`.
+`--skip-clearance` leaves clearance and mesh validation outstanding and therefore
+returns the existing review-required exit status.
 
 ```
 py -3.12 -m hipct_seg_debug.edit prepare-reconstruction centred_measured.am --seg labels.am --out reconstruction_layout.am

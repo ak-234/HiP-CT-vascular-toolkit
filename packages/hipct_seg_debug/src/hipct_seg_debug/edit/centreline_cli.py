@@ -14,6 +14,7 @@ def add_parsers(sub, common, seg_common):
     p.add_argument("--method", choices=METHODS, default="centroid-spline")
     p.add_argument("--segment", dest="segments", type=int, action="append", default=None)
     p.add_argument("--roots-json", default=None)
+    p.add_argument("--root-node", type=int, action="append", default=[])
     p.add_argument("--fixed-node", dest="fixed_nodes", type=int, action="append", default=[])
     p.add_argument("--fixed-junctions", action="store_true")
     p.add_argument("--strength", type=float, default=.1)
@@ -31,7 +32,13 @@ def add_parsers(sub, common, seg_common):
     p.add_argument("--max-iterations", type=int, default=30)
     p.add_argument("--gap-um", type=float, default=0.)
     p.add_argument("--max-displacement-radii", type=float, default=.5)
-    p.add_argument("--radius-profile", choices=("preserve", "confidence"), default="preserve")
+    p.add_argument("--radius-profile", choices=("preserve", "confidence", "dfs-confidence"), default="preserve")
+    p.add_argument("--transition-radii", type=float, default=4.,
+                   help="maximum cross-segment interpolation span in local radius units (minimum eight voxels)")
+    p.add_argument("--path-plan-json", default=None,
+                   help="refinement report whose original DFS ordering should be retained")
+    p.add_argument("--roots-json", default=None)
+    p.add_argument("--root-node", type=int, action="append", default=[])
     p.add_argument("--skip-clearance", action="store_true",
                    help="derive a radius profile without displacing centrelines")
     p.add_argument("--report-json", default=None)
@@ -47,12 +54,13 @@ def run(args):
     graph = _load(args.graph)
     labels, frame, _ = _open_lattice(args)
     stamp = _correct_units(graph, frame, args)
+    roots = set(getattr(args, 'root_node', ())) | set(root_nodes_for(graph, args, frame=frame))
     before = {sid: graph.coords(sid).copy() for sid in graph.segment_ids()}
     if args.command == "refine-centreline":
         from .centreline_refine import refine
         report = refine(
             graph, frame, labels, method=args.method, sids=args.segments,
-            fixed_nodes=set(args.fixed_nodes) | set(root_nodes_for(graph, args, frame=frame)),
+            fixed_nodes=set(args.fixed_nodes) | roots, root_nodes=roots,
             move_junctions=not args.fixed_junctions, strength=args.strength,
             max_iterations=args.max_iterations, max_half=args.max_half,
             max_samples=args.max_samples, workers=args.workers,
@@ -84,8 +92,15 @@ def run(args):
         from .graphmodel import EditableGraph
         measurements = copy.deepcopy(graph.triple)
         measurement_paths = list(args.graph)
+        path_plan = None
+        if getattr(args, 'path_plan_json', None):
+            document = json.loads(Path(args.path_plan_json).read_text(encoding='utf-8'))
+            path_plan = document.get('geometry', document).get('path_plan')
+            if not path_plan or args.radius_profile != 'dfs-confidence':
+                raise ValueError('--path-plan-json requires a DFS refinement report and dfs-confidence')
         profile = prepare_profile(graph, policy=args.radius_profile,
-                                  spacing_um=float(frame.seg_spacing[0])).to_dict()
+                                  spacing_um=float(frame.seg_spacing[0]), root_nodes=roots,
+                                  transition_radii=getattr(args, 'transition_radii', 4.), path_plan=path_plan).to_dict()
         # Revisit conflicting trusted endpoints using the shared section filter.
         conflicts = sorted({sid for row in profile['conflicts'] for sid in row['segments']})
         if conflicts:
@@ -101,7 +116,8 @@ def run(args):
             _save(graph, measurement_path, args.graph, voxel_um=stamp)
             measurement_paths = [measurement_path]
             profile = prepare_profile(graph, policy=args.radius_profile,
-                                      spacing_um=float(frame.seg_spacing[0])).to_dict()
+                                      spacing_um=float(frame.seg_spacing[0]), root_nodes=roots,
+                                      transition_radii=getattr(args, 'transition_radii', 4.), path_plan=path_plan).to_dict()
             profile['remeasured_segments'] = conflicts
         report = (dict(status='clearance_not_checked', surface_validation_required=True)
                   if args.skip_clearance else prepare(graph, frame, labels, max_iterations=args.max_iterations,

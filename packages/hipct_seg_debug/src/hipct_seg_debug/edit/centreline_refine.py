@@ -21,7 +21,7 @@ from .interpolation import mask_for_segment
 from .radius_perimeter import _BranchContext as _BranchContext, _rival_lies_in_blob
 from .section_validation import SectionContext
 
-METHODS = ("none", "centroid-spline", "centroid-coherent", "laplacian", "taubin")
+METHODS = ("none", "centroid-spline", "centroid-coherent", "dfs-centroid", "laplacian", "taubin")
 
 
 def arclength(x):
@@ -229,6 +229,7 @@ class RefinementReport:
     history: list = field(default_factory=list)
     segments: dict = field(default_factory=dict)
     neighbourhoods: dict = field(default_factory=dict)
+    path_plan: list = field(default_factory=list)
 
     def to_dict(self):
         return asdict(self)
@@ -333,7 +334,7 @@ def _targets(graph, sid, frame, sampler, ctx, scale, max_half, max_samples,
 def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
            fixed_nodes=(), move_junctions=True, strength=.1, max_iterations=25,
            max_half=256, max_samples=32, workers=1, progress=None,
-           section_progress=None, checkpoint=None, reuse_sections=True):
+           section_progress=None, checkpoint=None, reuse_sections=True, root_nodes=()):
     """Refine selected segments with full-graph branch context, preserving radii.
 
     Junctions move only when every incident segment participates. Overlapping
@@ -360,6 +361,15 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                                       for x in original.values())
     scale = {sid: np.maximum(2*sp, graph.radii(sid).copy()) for sid in sids}
     held = set(fixed_nodes) | {nid for nid in graph.nodes if graph.degree(nid) == 1}
+    dfs = method == 'dfs-centroid'
+    centroid = method.startswith('centroid-') or dfs
+    coherent = method in ('centroid-coherent', 'dfs-centroid')
+    if dfs:
+        from .dfs_paths import root_paths
+        report.path_plan = root_paths(graph, root_nodes)
+        held.update(p['root'] for p in report.path_plan)
+        if not move_junctions:
+            held.update(graph.nodes)
     local = threading.local()
     stable_rounds = 0
     previous_moves = {}
@@ -394,7 +404,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                 if len(before[sid]) < 4:
                     return sid, (before[sid].copy(), np.zeros(len(before[sid])), [], [])
                 return sid, _targets(graph, sid, frame, local.sampler, ctx, scale[sid],
-                                     max_half, max_samples, method == "centroid-coherent",
+                                     max_half, max_samples, coherent,
                                      diagnostics=section_diagnostics[sid])
 
             if process_sections and pending:
@@ -403,7 +413,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                         mp_context=multiprocessing.get_context('spawn'),
                         initializer=_init_section_worker,
                         initargs=(graph.triple, frame, lattice, scale, max_half, max_samples,
-                                  method == 'centroid-coherent')) as processes:
+                                  coherent)) as processes:
                     futures = [processes.submit(_section_work, sid) for sid in pending]
                     for future in as_completed(futures):
                         sid, result, diagnostics, seconds = future.result()
@@ -420,7 +430,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
             # Internal unsupported links can be fitted from exclusive sections on
             # the external approaches of a jointly solved junction cluster.
             node_targets = {}
-            if move_junctions and method.startswith("centroid-"):
+            if move_junctions and centroid:
                 selected = set(sids)
                 node_targets = {nid: np.asarray(graph.nodes[nid][:3]) for nid in graph.nodes
                                 if nid not in held and graph.degree(nid) >= 2
@@ -432,14 +442,23 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                 target, weights, good, measured = observations[sid]
                 if measured:
                     scale[sid] = np.maximum(2*sp, np.interp(arclength(x), arclength(x)[good], measured))
-                if len(good) >= 2 and method.startswith('centroid-'):
+                if len(good) >= 2 and centroid:
                     residual = np.linalg.norm(target-x, axis=1)
                     typical = max(sp, float(np.median(residual[weights > 0])))
                     weights *= np.minimum(1., 2*typical/np.maximum(residual, sp))
             # Solve shared junctions BEFORE independent interiors. Failed joint
             # fits must not leave bowed interiors attached to unchanged nodes.
             deferred, junction_pins = set(), {sid: set() for sid in sids}
-            if method.startswith('centroid-') and move_junctions:
+            if dfs:
+                from .dfs_refine import fit_paths
+                with graph.batch('longest path first fitting'):
+                    report.neighbourhoods = fit_paths(graph, report.path_plan, sids,
+                        observations, scale, sampler, frame, strength, held)
+                completed = {sid for row in report.neighbourhoods.values()
+                             if row['status'] in ('moving', 'stationary')
+                             for sid in row['new_segments']}
+                deferred = set(sids)-completed
+            elif centroid and move_junctions:
                 with graph.batch('joint junction and approach fitting'):
                     report.neighbourhoods = refine_neighbourhoods(
                         graph, node_targets, observations, scale, sampler, frame, strength)
@@ -462,7 +481,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                                             section_scale_um=float(np.median(scale[sid])))
                 if sid in deferred:
                     report.segments[sid]['blocked_reason'] = 'junction_fit_unresolved'
-                if sid in deferred or len(good) < 2 or len(x) < 4:
+                if dfs or sid in deferred or len(good) < 2 or len(x) < 4:
                     proposals[sid] = x.copy()
                     continue
                 if method.startswith("centroid-"):
@@ -488,7 +507,8 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
             with graph.batch("segmentation-constrained centreline refinement"):
                 for group in groups:
                     sid = next(iter(group))
-                    delta = proposals[sid]-interior_before[sid]
+                    delta = (graph.coords(sid)-before[sid] if dfs
+                             else proposals[sid]-interior_before[sid])
                     previous = previous_moves.get(sid)
                     oscillating = previous is not None and np.sum(delta*previous) < 0
                     oscillations += int(oscillating)
@@ -498,6 +518,11 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                     if sid in previous_support and previous_support[sid] != support:
                         changed_support.add(sid)
                     previous_support[sid] = support
+                    if dfs:
+                        # Joint path fitting already performed its objective and
+                        # containment line search; do not refit its interiors.
+                        previous_moves[sid] = graph.coords(sid)-before[sid]
+                        continue
                     target, weights = observations[sid][:2]
                     initial_cost = fit_objective(interior_before[sid], target, weights, scale[sid],
                                                  interior_before[sid], sp, strength)
@@ -539,6 +564,9 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
             curve_supported = {sid for sid in sids if len(observations[sid][2]) >= 2}
             for row in report.neighbourhoods.values():
                 if row['status'] not in ('moving', 'stationary'):
+                    continue
+                if dfs:
+                    curve_supported.update(row['supported_segments'])
                     continue
                 nodes = set(row['nodes'])
                 curve_supported.update(sid for sid in row['segments'] if {

@@ -78,6 +78,8 @@ def evaluate(args, target=None):
                                    voxel_um=None, edits=None)
     labels, frame, _ = _open_lattice(lattice_args)
     stamp = _correct_units(graph, frame, lattice_args)
+    from .roots import root_nodes_for
+    roots = set(getattr(args, 'root_node', ())) | set(root_nodes_for(graph, args, frame=frame))
     selected = graph.segment_ids() if target is None else neighbourhood(graph, target)
     directory = Path(args.out_dir)/('full_tree' if target is None else f'region_{target}')
     directory.mkdir(parents=True, exist_ok=True)
@@ -92,8 +94,8 @@ def evaluate(args, target=None):
             _save(graph, str(directory/'geometry.iteration.am'), [args.graph], voxel_um=stamp)
             write_json(directory/'geometry.iteration.json', dict(partial, checkpoint_only=True,
                                                                 radii_require_remeasurement=True))
-        geometry = refine(graph, frame, labels, method='centroid-coherent', sids=selected,
-                           fixed_nodes=args.fixed_node, strength=.01,
+        geometry = refine(graph, frame, labels, method=getattr(args, 'method', 'centroid-coherent'), sids=selected,
+                           fixed_nodes=set(args.fixed_node) | roots, root_nodes=roots, strength=.01,
                            max_iterations=args.max_iterations, max_samples=args.max_samples,
                            workers=args.workers,
                            reuse_sections=not getattr(args, 'no_section_cache', False),
@@ -189,6 +191,9 @@ def main(argv=None):
     parser.add_argument('--out-dir', required=True)
     parser.add_argument('--segment', type=int, action='append', default=[])
     parser.add_argument('--fixed-node', type=int, action='append', default=[])
+    parser.add_argument('--method', choices=('centroid-coherent', 'dfs-centroid'), default='centroid-coherent')
+    parser.add_argument('--root-node', type=int, action='append', default=[])
+    parser.add_argument('--roots-json', default=None)
     parser.add_argument('--workers', type=int, default=8)
     parser.add_argument('--no-section-cache', action='store_true',
                         help='disable exact section reuse for benchmarking')
