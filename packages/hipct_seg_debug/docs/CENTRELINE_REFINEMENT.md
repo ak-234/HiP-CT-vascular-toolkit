@@ -85,6 +85,9 @@ not veto a supported through path, but remain explicitly unsupported in the repo
 Two-point internal links can receive support from accepted sections on both sides.
 This experimental method does not establish that the longest path is the anatomical
 main vessel. Compare the recorded path order and segmentation overlays.
+Progress includes `stage: path_fit` after section sampling. Identical failed
+regional prefixes are not retried until another accepted fit changes the fitting
+state; their original failure remains in the report.
 
 `dfs-confidence` extends the existing `confidence` profile across segment boundaries
 along the first path that owns each segment. It interpolates rejected/unmeasured

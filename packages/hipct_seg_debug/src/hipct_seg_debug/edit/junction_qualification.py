@@ -102,6 +102,8 @@ def evaluate(args, target=None):
                            checkpoint=checkpoint,
                            section_progress=lambda row: print(json.dumps(dict(region=target,
                                stage='section_support', **row)), flush=True),
+                           path_progress=lambda row: print(json.dumps(dict(region=target,
+                               stage='path_fit', **row)), flush=True),
                            progress=lambda row: print(json.dumps(dict(region=target, **row)), flush=True)).to_dict()
         _save(graph, str(geometry_path), [args.graph], voxel_um=stamp)
         write_json(directory/'geometry.json', geometry)

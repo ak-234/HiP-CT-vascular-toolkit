@@ -242,3 +242,22 @@ def test_duplicate_joint_observations_are_not_two_independent_sections(monkeypat
     assert not report.converged
     assert report.neighbourhoods[0]['reason'] == 'path_has_fewer_than_two_distinct_sections'
     assert g.points == before
+
+
+def test_repeated_failed_regional_prefix_is_attempted_once(monkeypatch):
+    from hipct_seg_debug.edit import dfs_refine
+    from hipct_seg_debug.crosssection import _PlaneSampler
+    g = tree()
+    calls, progress = [], []
+    def blocked(*args, **kwargs):
+        calls.append(1)
+        return dict(status='blocked', nodes=[], segments=[0], spans={0: [0, 24]})
+    monkeypatch.setattr(dfs_refine, 'fit_cluster', blocked)
+    x = g.coords(0)
+    frame = make_frame((70, 110, 120))
+    dfs_refine.fit_paths(g, root_paths(g, [0]), [0],
+        {0: (x, np.ones(len(x)), list(range(len(x))), [50.]*len(x))},
+        {0: np.full(len(x), 50.)}, _PlaneSampler(np.ones((70, 110, 120), dtype='uint8'), frame),
+        frame, .1, {0, 2, 3}, progress=progress.append)
+    assert len(calls) == len(progress) == 1
+    assert progress[0]['status'] == 'blocked'

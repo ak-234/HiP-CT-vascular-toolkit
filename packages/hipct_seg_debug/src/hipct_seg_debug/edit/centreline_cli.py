@@ -66,6 +66,7 @@ def run(args):
             max_samples=args.max_samples, workers=args.workers,
             reuse_sections=not getattr(args, 'no_section_cache', False),
             progress=lambda row: print(json.dumps(row), flush=True),
+            path_progress=lambda row: print(json.dumps(dict(stage='path_fit', **row)), flush=True),
         ).to_dict()
         if not args.geometry_only:
             result = rp.measure_radii(graph, frame, labels, workers=args.workers,

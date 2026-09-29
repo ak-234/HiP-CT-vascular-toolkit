@@ -8,7 +8,8 @@ from .dfs_paths import path_samples
 from .junction_cluster import fit_cluster
 
 
-def fit_paths(graph, paths, selected, observations, scales, sampler, frame, strength, held):
+def fit_paths(graph, paths, selected, observations, scales, sampler, frame, strength, held,
+              progress=None):
     selected, held, processed = set(selected), set(held), set()
     reports = {}
     failed_at, revision = {}, 0
@@ -37,6 +38,9 @@ def fit_paths(graph, paths, selected, observations, scales, sampler, frame, stre
                 reports[len(reports)] = dict(base, status='insufficient_support', nodes=[],
                     segments=main, supported_segments=[], reason='path_has_fewer_than_two_distinct_sections')
                 failed_at[key] = revision
+                if progress:
+                    progress(dict(path_terminal=path['terminal'], new_segments=main,
+                                  status='insufficient_support'))
                 continue
             nodes = {graph.segment(sid)[key] for sid in main for key in ('node1', 'node2')}
             movable = {n for n in nodes if n not in held and graph.degree(n) > 1
@@ -72,6 +76,9 @@ def fit_paths(graph, paths, selected, observations, scales, sampler, frame, stre
                     supported.append(sid)
             result.update(base, supported_segments=supported)
             reports[len(reports)] = result
+            if progress:
+                progress(dict(path_terminal=path['terminal'], new_segments=main,
+                              status=result['status'], max_move_um=result.get('max_move_um', 0.)))
             if result['status'] in ('moving', 'stationary'):
                 processed.update(main)
                 revision += 1

@@ -334,7 +334,8 @@ def _targets(graph, sid, frame, sampler, ctx, scale, max_half, max_samples,
 def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
            fixed_nodes=(), move_junctions=True, strength=.1, max_iterations=25,
            max_half=256, max_samples=32, workers=1, progress=None,
-           section_progress=None, checkpoint=None, reuse_sections=True, root_nodes=()):
+           section_progress=None, checkpoint=None, reuse_sections=True, root_nodes=(),
+           path_progress=None):
     """Refine selected segments with full-graph branch context, preserving radii.
 
     Junctions move only when every incident segment participates. Overlapping
@@ -453,7 +454,9 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                 from .dfs_refine import fit_paths
                 with graph.batch('longest path first fitting'):
                     report.neighbourhoods = fit_paths(graph, report.path_plan, sids,
-                        observations, scale, sampler, frame, strength, held)
+                        observations, scale, sampler, frame, strength, held,
+                        progress=(lambda row: path_progress(dict(iteration=iteration+1, **row)))
+                        if path_progress else None)
                 completed = {sid for row in report.neighbourhoods.values()
                              if row['status'] in ('moving', 'stationary')
                              for sid in row['new_segments']}
