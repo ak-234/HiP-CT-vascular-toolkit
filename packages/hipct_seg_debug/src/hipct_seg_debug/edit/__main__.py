@@ -452,7 +452,14 @@ def build_parser() -> argparse.ArgumentParser:
     skel_all.add_argument("--out-dir", default="skeletons",
                           help="where to write every candidate .am")
     skel_all.add_argument("--algorithms", default="lee",
-                          help="comma-separated: lee, teasar, amira")
+                          help="comma-separated: lee, teasar, amira, jin-mcp (experimental)")
+    skel_all.add_argument("--jin-max-voxels", type=int, default=2_000_000,
+                          help="Jin MCP maximum ROI voxel count (default 2000000)")
+    skel_all.add_argument("--jin-root-zyx", type=int, nargs=3, default=None,
+                          help="Jin extraction root in decoded ROI voxels; single component only")
+    skel_all.add_argument("--roi-zyx", type=int, nargs=6, default=None,
+                          metavar=("Z0", "Z1", "Y0", "Y1", "X0", "X1"),
+                          help="decode only this source-voxel region (exclusive upper bounds; stride 1)")
     skel_all.add_argument("--amira-graph", default=None,
                           help="existing Avizo .am to score as the 'amira' candidate")
     skel_all.add_argument("--teasar-scale", type=float, default=None,
@@ -2146,10 +2153,29 @@ def _decoded(args):
     decoded_bytes = math.prod(int(n) for n in sampled_shape)
     origin_zyx = (0, 0, 0)
 
+    roi = getattr(args, "roi_zyx", None)
+    if roi is None and 'jin-mcp' in getattr(args, 'algorithms', '').split(',') and decoded_bytes > args.jin_max_voxels:
+        raise ValueError('Jin MCP input exceeds --jin-max-voxels; specify --roi-zyx before decoding')
+    if roi is not None:
+        bounds = np.asarray(roi, dtype=np.int64).reshape(3, 2)
+        extent = bounds[:, 1] - bounds[:, 0]
+        if stride != 1 or np.any(bounds[:, 0] < 0) or np.any(extent <= 0) or np.any(bounds[:, 1] > sampled_shape):
+            raise ValueError('--roi-zyx requires valid source bounds and --stride 1')
+        if 'jin-mcp' in getattr(args, 'algorithms', '').split(',') and math.prod(map(int, extent)) > args.jin_max_voxels:
+            raise ValueError('ROI exceeds --jin-max-voxels; reduce its bounds before decoding')
+        origin_zyx = tuple(map(int, bounds[:, 0]))
+        z0, z1, y0, y1, x0, x1 = map(int, roi)
+        volume = np.empty(tuple(extent), dtype=np.uint8)
+        reader = getattr(labels, 'slice_window', None)
+        for i, z in enumerate(range(z0, z1)):
+            volume[i] = (reader(z, y0, y1, x0, x1) if reader is not None
+                         else labels.slice_z(z)[y0:y1, x0:x1])
+        print(f'ROI {roi}: cut boundaries are artificial; assess them separately')
+
     # Dense topology/scoring operations create several arrays per voxel.  Above this
     # size, decoding the all-zero exterior first is both dangerous and pointless.
     # Cropping changes neither foreground nor world coordinates.
-    if decoded_bytes > 8 * (1 << 30):
+    elif decoded_bytes > 8 * (1 << 30):
         print(
             f"{Path(path).name}: foreground scan before decoding "
             f"{decoded_bytes / 1e9:.2f} GB (stride {stride})..."
@@ -2236,6 +2262,13 @@ def cmd_skeletonise_all(args) -> int:
         image, refs = _scoring_context(args, volume, frame)
 
     params: dict[str, dict] = {n: {} for n in names}
+    if "jin-mcp" in params:
+        params["jin-mcp"]["max_voxels"] = args.jin_max_voxels
+        params["jin-mcp"]["report_dir"] = str(Path(args.out_dir) / "jin-mcp-reports")
+        if args.jin_root_zyx is not None:
+            if args.per_tree:
+                raise ValueError('--jin-root-zyx is relative to one ROI; cannot combine with --per-tree')
+            params["jin-mcp"]["root_zyx"] = args.jin_root_zyx
     if "teasar" in params:
         if args.teasar_scale is not None:
             params["teasar"]["scale"] = args.teasar_scale
