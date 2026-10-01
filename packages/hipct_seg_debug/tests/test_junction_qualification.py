@@ -2,6 +2,8 @@ import hashlib
 import json
 from types import SimpleNamespace
 
+import numpy as np
+
 from hipct_seg_debug import rle_write
 from hipct_seg_debug.edit.__main__ import _save, _load
 from hipct_seg_debug.edit.junction_qualification import evaluate
@@ -31,6 +33,12 @@ def test_regional_pipeline_writes_separate_measurements_profile_mesh_and_overlay
     frame = make_frame((32, 32, 70))
     labels = cylinder((32, 32, 70), 5, 2, 68)
     graph = graph_from(frame.seg_to_um([[8, 16, 16], [62, 16, 16]]), [(0, 1, 20, 50.)])
+    from hipct_seg_debug.edit.radius_perimeter import ACCEPTED, PERIMETER
+    from hipct_seg_debug.edit.radius_profile import trusted_radii
+    for name, value in [('radius_source', PERIMETER), ('radius_reject_reason', ACCEPTED)]:
+        graph.triple.point_attrs[name] = dict.fromkeys(graph.segment(0)['point_ids'], value)
+        graph.triple.point_attr_dtypes[name] = np.dtype(np.int64)
+    assert trusted_radii(graph, 0).all()
     original, seg = tmp_path/'input.am', tmp_path/'labels.am'
     _save(graph, str(original), [], voxel_um=10.)
     rle_write.write_lattice(seg, labels, frame.seg_bbox_um)
@@ -46,6 +54,9 @@ def test_regional_pipeline_writes_separate_measurements_profile_mesh_and_overlay
     assert (directory/'reconstruction.am').exists()
     assert (directory/'surface.vtp').exists()
     assert (directory/'segment_0_overlay.png').exists()
+    geometry_graph = _load([str(directory/'geometry.am')])
+    assert not trusted_radii(geometry_graph, 0).any()
+    np.testing.assert_array_equal(geometry_graph.radii(0), graph.radii(0))
     measured = _load([str(directory/'measured.am')])
     reconstruction = _load([str(directory/'reconstruction.am')])
     assert 'radius_reconstruction_um' not in measured.triple.point_attrs

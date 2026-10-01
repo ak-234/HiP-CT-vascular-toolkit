@@ -90,6 +90,10 @@ def evaluate(args, target=None):
         graph = _load([str(geometry_path)])
         geometry = json.loads((directory/'geometry.json').read_text())
     else:
+        from .measurement_provenance import invalidate_radii
+        # Section directions and ownership may change across this neighbourhood.
+        # Checkpoints must not expose old radii as measurements of new geometry.
+        invalidate_radii(graph, selected)
         def checkpoint(partial):
             _save(graph, str(directory/'geometry.iteration.am'), [args.graph], voxel_um=stamp)
             write_json(directory/'geometry.iteration.json', dict(partial, checkpoint_only=True,

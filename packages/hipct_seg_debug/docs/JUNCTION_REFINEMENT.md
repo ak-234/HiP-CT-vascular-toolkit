@@ -270,3 +270,53 @@ Two unresolved issues are documented by that investigation:
   perimeter at the **same orientation** (3877 versus 7892 micrometres). Stability
   alone therefore cannot establish anatomically correct ownership. No shortened
   slab default or relaxed contamination threshold has been adopted.
+
+## Flattened-lumen refinement evaluation (2026-10-01)
+
+The opt-in `dfs-centroid-shape` mode adds independent shape evidence and final
+centring/degree-two continuity audits. The focused suite passed 124 tests, with
+the optional VMTK integration skipped and the existing noisy axial-continuation
+filter regression xfailed. A subsequent geometry-export provenance test passed:
+geometry checkpoints invalidate radius trust while retaining numeric placeholders.
+On a flattened synthetic vessel, maximum error fell from 59.98 to 2.41 micrometres
+in four iterations, with fixed endpoints and no segmentation exits.
+
+Complete junction neighbourhoods were then evaluated at eight section stations
+per segment. The 3612 neighbourhood (including 3655) resumed a two-iteration
+checkpoint for one additional iteration. Other regions ran two iterations. These
+are geometry experiments, not remeasured or reconstruction-ready graphs.
+
+| Target | Final centring audit | Maximum accepted-section offset |
+|---|---|---|
+| 3717 | Off centre at one of six accepted stations | 197.36 um; 0.333 short semi-axes |
+| 3612 | Insufficient support: no accepted stations | Unknown |
+| 3655 | Insufficient support: no accepted stations | Unknown |
+| Control 318 | Within provisional tolerance at four accepted stations | 18.44 um |
+| Control 4390 | Within provisional tolerance at three accepted stations | 13.60 um |
+
+The final audit on 3612 recorded 71 neighbouring-lumen rejections and one
+insufficient-support rejection across candidate orientations; 3655 recorded 72
+neighbouring-lumen rejections. These are candidate counts, not 71/72 independent
+cross-sections. Missing support was not replaced with invented measurements.
+
+A subsequent read-only audit sampled every point on 3612 and 3655. It found
+accepted sections at points 22 and 23 on 3612, between the coarse audit stations,
+but both were off centre: maximum offset 333.10 micrometres, or 0.878 short
+semi-axes. No section was accepted on 3655. This diagnostic used stored radii for
+initial section/tangent scales rather than the refinement's iteratively measured
+scales, so it is not an exact resampling of the earlier audit. It demonstrates
+that the coarse sampling can miss a narrow support window; it does not qualify
+3612. Production defaults use 32 stations, and neither sparse audit establishes
+centring along the entire curve.
+
+Exported graphs preserve IDs, connectivity, shared endpoint coordinates, fixed
+roots/terminals, numeric radii and unselected geometry. Exact edge traversal found
+no new segmentation exits. Existing outside-edge counts stayed 12/12 for the
+expanded 3612 neighbourhood, 9/9 for 3717, 1/1 for control 318 and 7/7 for control
+4390. Neither target neighbourhood nor the complete control neighbourhoods
+converged. The target centring results therefore block full-tree promotion;
+remeasurement and surface qualification have not been performed on these outputs.
+
+The implemented Jin hybrid is a post-extraction centroid/curvature fit, not a
+modified Jin shortest-path cost. The optional VMTK baseline remains unexecuted
+because its dependency is absent. See `JIN_MCP.md` for these distinctions.
