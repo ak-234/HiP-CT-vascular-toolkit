@@ -452,11 +452,17 @@ def build_parser() -> argparse.ArgumentParser:
     skel_all.add_argument("--out-dir", default="skeletons",
                           help="where to write every candidate .am")
     skel_all.add_argument("--algorithms", default="lee",
-                          help="comma-separated: lee, teasar, amira, jin-mcp (experimental)")
+                          help="comma-separated: lee, teasar, amira, jin-mcp, jin-mcp-centroid, vmtk")
     skel_all.add_argument("--jin-max-voxels", type=int, default=2_000_000,
                           help="Jin MCP maximum ROI voxel count (default 2000000)")
     skel_all.add_argument("--jin-root-zyx", type=int, nargs=3, default=None,
                           help="Jin extraction root in decoded ROI voxels; single component only")
+    skel_all.add_argument("--jin-refine-iterations", type=int, default=5,
+                          help="centroid fitting iterations for the Jin hybrid")
+    skel_all.add_argument("--vmtk-source-xyz", type=float, nargs=3, action='append', default=None,
+                          help="VMTK source seed in world micrometres (repeatable)")
+    skel_all.add_argument("--vmtk-target-xyz", type=float, nargs=3, action='append', default=None,
+                          help="VMTK target seed in world micrometres (repeatable)")
     skel_all.add_argument("--roi-zyx", type=int, nargs=6, default=None,
                           metavar=("Z0", "Z1", "Y0", "Y1", "X0", "X1"),
                           help="decode only this source-voxel region (exclusive upper bounds; stride 1)")
@@ -2154,14 +2160,17 @@ def _decoded(args):
     origin_zyx = (0, 0, 0)
 
     roi = getattr(args, "roi_zyx", None)
-    if roi is None and 'jin-mcp' in getattr(args, 'algorithms', '').split(',') and decoded_bytes > args.jin_max_voxels:
-        raise ValueError('Jin MCP input exceeds --jin-max-voxels; specify --roi-zyx before decoding')
+    requested = {n.strip() for n in getattr(args, 'algorithms', '').split(',')}
+    bounded = bool(requested & {'jin-mcp', 'jin-mcp-centroid', 'vmtk'})
+    limit = min(getattr(args, 'jin_max_voxels', 2_000_000), 2_000_000) if 'vmtk' in requested else getattr(args, 'jin_max_voxels', 2_000_000)
+    if roi is None and bounded and decoded_bytes > limit:
+        raise ValueError('Experimental skeleton input exceeds voxel limit; specify --roi-zyx before decoding')
     if roi is not None:
         bounds = np.asarray(roi, dtype=np.int64).reshape(3, 2)
         extent = bounds[:, 1] - bounds[:, 0]
         if stride != 1 or np.any(bounds[:, 0] < 0) or np.any(extent <= 0) or np.any(bounds[:, 1] > sampled_shape):
             raise ValueError('--roi-zyx requires valid source bounds and --stride 1')
-        if 'jin-mcp' in getattr(args, 'algorithms', '').split(',') and math.prod(map(int, extent)) > args.jin_max_voxels:
+        if bounded and math.prod(map(int, extent)) > limit:
             raise ValueError('ROI exceeds --jin-max-voxels; reduce its bounds before decoding')
         origin_zyx = tuple(map(int, bounds[:, 0]))
         z0, z1, y0, y1, x0, x1 = map(int, roi)
@@ -2262,13 +2271,21 @@ def cmd_skeletonise_all(args) -> int:
         image, refs = _scoring_context(args, volume, frame)
 
     params: dict[str, dict] = {n: {} for n in names}
-    if "jin-mcp" in params:
-        params["jin-mcp"]["max_voxels"] = args.jin_max_voxels
-        params["jin-mcp"]["report_dir"] = str(Path(args.out_dir) / "jin-mcp-reports")
+    for name in ('jin-mcp', 'jin-mcp-centroid'):
+        if name not in params:
+            continue
+        params[name]["max_voxels"] = args.jin_max_voxels
+        params[name]["report_dir"] = str(Path(args.out_dir) / f"{name}-reports")
+        if name == 'jin-mcp-centroid':
+            params[name]['refine_iterations'] = args.jin_refine_iterations
         if args.jin_root_zyx is not None:
             if args.per_tree:
                 raise ValueError('--jin-root-zyx is relative to one ROI; cannot combine with --per-tree')
-            params["jin-mcp"]["root_zyx"] = args.jin_root_zyx
+            params[name]["root_zyx"] = args.jin_root_zyx
+    if 'vmtk' in params:
+        if args.per_tree:
+            raise ValueError('VMTK baseline requires a single connected ROI and matching explicit seeds')
+        params['vmtk'].update(source_points=args.vmtk_source_xyz, target_points=args.vmtk_target_xyz)
     if "teasar" in params:
         if args.teasar_scale is not None:
             params["teasar"]["scale"] = args.teasar_scale

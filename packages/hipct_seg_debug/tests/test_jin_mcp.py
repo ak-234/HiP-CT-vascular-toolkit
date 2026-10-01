@@ -179,3 +179,17 @@ def test_command_writes_graph_and_acceptance_report(monkeypatch, tmp_path):
     report = json.loads(next((tmp_path / 'jin-mcp-reports').glob('*.json')).read_text())
     assert report['root_zyx'] == [5, 5, 4]
     assert report['review_required']
+
+
+def test_centroid_hybrid_writes_separate_refinement_report(tmp_path):
+    import json
+    m = bar()
+    raw = skeletonise('jin-mcp', m, make_frame(m.shape), root_zyx=(5, 5, 4))
+    hybrid = skeletonise('jin-mcp-centroid', m, make_frame(m.shape), root_zyx=(5, 5, 4),
+                         refine_iterations=2, report_dir=tmp_path)
+    assert len(raw.triple.segments) == len(hybrid.triple.segments)
+    np.testing.assert_array_equal([p[3] for p in raw.triple.points.values()],
+                                  [p[3] for p in hybrid.triple.points.values()])
+    report = json.loads(next(tmp_path.glob('*_refinement.json')).read_text())
+    assert report['method'] == 'dfs-centroid-shape'
+    assert all('centring_final' in r for r in report['segments'].values())

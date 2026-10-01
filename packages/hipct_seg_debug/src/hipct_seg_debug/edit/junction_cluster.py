@@ -50,7 +50,7 @@ def neighbourhood_clusters(graph, nodes, observations, scales, spacing):
 
 
 def fit_cluster(graph, nodes, spans, observations, scales, sampler, frame, strength,
-                *, require_external_support=True):
+                *, require_external_support=True, section_weighting=False):
     """One quadratic solve with shared node variables and fixed outer tangents.
 
     Unsupported internal links receive support through both jointly fitted nodes.
@@ -113,9 +113,20 @@ def fit_cluster(graph, nodes, spans, observations, scales, sampler, frame, stren
         if len(ds) < 1 or np.any(ds <= 1e-9):
             return dict(report, status='insufficient_support', reason='degenerate_span')
         q = np.r_[ds[0]/2, (ds[:-1]+ds[1:])/2, ds[-1]/2]
+        support_weight = q.copy()
+        if section_weighting:
+            # A section represents its physical support interval, not the local
+            # spacing of arbitrary exported centreline points. Bound its reach
+            # by calibre so a long unsupported gap cannot create a huge anchor.
+            good = np.flatnonzero(observations[sid][1][ids] > 0)
+            if len(good):
+                boundaries = np.r_[s[0], (s[good][:-1]+s[good][1:])/2, s[-1]]
+                support_weight[good] = np.minimum(np.diff(boundaries),
+                    4*np.maximum(2*sp, np.asarray(scales[sid])[ids[good]]))
         v = indices[sid]
         for j, i in enumerate(ids):
-            add({v[j]: 1.}, observations[sid][0][i], max(.005, observations[sid][1][i])*q[j])
+            add({v[j]: 1.}, observations[sid][0][i],
+                max(.005, observations[sid][1][i])*support_weight[j])
         for j in range(1, len(ids)-1):
             calibre = max(2*sp, scales[sid][ids[j]])
             add({v[j-1]: 1/ds[j-1], v[j]: -1/ds[j-1]-1/ds[j], v[j+1]: 1/ds[j]},

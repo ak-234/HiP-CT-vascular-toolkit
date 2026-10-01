@@ -40,7 +40,7 @@ class SectionObservationCache:
         self.lower, self.upper = np.asarray(self.lower), np.asarray(self.upper)
         self.pending.clear()
 
-    def get(self, sid, scale):
+    def get(self, sid, scale, extra=None):
         x = self.graph.coords(sid)
         if not len(x) or not np.isfinite(x).all() or not np.isfinite(scale).all():
             return None
@@ -48,6 +48,8 @@ class SectionObservationCache:
         near = np.flatnonzero(np.all(self.upper >= x.min(axis=0)-margin, axis=1)
                               & np.all(self.lower <= x.max(axis=0)+margin, axis=1))
         h = hashlib.sha256(np.asarray(scale).tobytes())
+        if extra is not None:
+            h.update(np.asarray(extra).tobytes())
         h.update(self.signatures[self.positions[sid]])
         h.update(np.asarray(mask_for_segment(self.graph, sid)).tobytes())
         h.update(near.tobytes())

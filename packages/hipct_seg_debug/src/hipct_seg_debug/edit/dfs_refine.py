@@ -9,7 +9,7 @@ from .junction_cluster import fit_cluster
 
 
 def fit_paths(graph, paths, selected, observations, scales, sampler, frame, strength, held,
-              progress=None):
+              progress=None, section_weighting=False):
     selected, held, processed = set(selected), set(held), set()
     reports = {}
     failed_at, revision = {}, 0
@@ -65,7 +65,8 @@ def fit_paths(graph, paths, selected, observations, scales, sampler, frame, stre
                         bounds = min(bounds[0], spans[sid][0]), max(bounds[1], spans[sid][1])
                     spans[sid] = bounds
             result = fit_cluster(graph, movable, spans, observations, scales, sampler, frame,
-                                 strength, require_external_support=False)
+                                 strength, require_external_support=False,
+                                 **({'section_weighting': True} if section_weighting else {}))
             # The path can bridge an unmeasurable short segment only when accepted
             # sections bracket it. Unsupported side approaches remain explicit.
             left, right = path_s[good][[0, -1]]

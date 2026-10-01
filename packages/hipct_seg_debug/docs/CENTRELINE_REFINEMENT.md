@@ -30,6 +30,7 @@ invent a connection through background.
 | `centroid-spline` | Confidence-weighted cubic fit to section centroids, using the radius estimator's section orientation search |
 | `centroid-coherent` | Same fit, but retains the fitted curve's normal when its section passes stability checks; searches alternatives only when it fails |
 | `dfs-centroid` | Fits root-to-terminal paths longest first, with shared movable internal nodes and bounded joint fitting at later branch attachments |
+| `dfs-centroid-shape` | Adds section-shape diagnostics, physically weighted observations, supported-centroid tangent hints and a fresh final centring audit to joint DFS fitting |
 | `laplacian` | Implicit diffusion using physical edge lengths and locally measured section scales |
 | `taubin` | Shrinkage-compensated implicit Laplacian, using `2H-H²` for the implicit filter `H` |
 
@@ -56,6 +57,61 @@ Defaults are 25 iterations, 32 sample stations per segment, strength 0.1 and a
 256-voxel maximum half-window. Convergence requires two steps below 0.1 voxel.
 Non-convergence, insufficient support, blocked moves and pre-existing outside
 edges are reported. No new method has been promoted into `optimise-skeleton`.
+
+### Flattened-lumen refinement
+
+```powershell
+python -m hipct_seg_debug.edit refine-centreline graph.am --seg labels.am --method dfs-centroid-shape --strength 0.01 --workers 8 --max-samples 32 --geometry-only --out centred_geometry.am --report-json centring.json
+```
+
+Use `--roots-json` or repeated `--root-node` when roots are known. For a regional
+experiment, select complete junction neighbourhoods with the qualification driver:
+
+```powershell
+python -m hipct_seg_debug.edit.junction_qualification --graph graph.am --seg labels.am --method dfs-centroid-shape --segment 3717 --segment 3655 --segment 3612 --workers 8 --geometry-only --out-dir runs/shape-regions
+```
+
+This mode retains actual cross-sectional area centroids, including flattened
+sections. It uses the shared ownership/stability filter and accepts no centroid
+whose position or straight movement leaves the selected lumen. A concave section
+can have its centroid outside the lumen; such an observation is rejected, with
+curve support left to neighbouring exclusive sections. Section normals use
+physical-arclength curve fits, with exclusive centroid observations providing
+direction hints on subsequent iterations. All alternate normals still pass the
+shared filter. The original Jin shortest-path cost is not used in this fitter.
+
+Independent boundary ellipse fits report axis ratio, centroid disagreement and
+normalised radial residual. They do not replace the lumen, its centroid or its
+perimeter. Only a fit with an interior centre, at least a two-pixel minor radius
+and radial RMS at most 0.12 contributes an agreement weight. These are provisional
+diagnostic criteria, not anatomical classifiers. Flattening alone never rejects
+or downweights a section. Area/perimeter instability reduces confidence.
+
+Accepted section observations represent their physical support intervals (capped
+at four local calibres), instead of the adjacent exported point spacing. Joint
+fitting retains locally scaled curvature regularisation, shared movable junction
+variables and the exact degree-two derivative constraint. Outer anchors, roots,
+terminals, segment IDs, radii and connectivity retain their previous safeguards.
+There is no independent point-shifting correction or forced daughter calibre.
+
+The report contains per-section offsets in micrometres and in units of the short
+semi-axis, ellipse checks, and per-segment turn/curvature diagnostics. After the
+last geometry update, sections are measured again on the final curve. This audit
+uses fitted-curve normals without the previous iteration's tangent hints. It can
+run in parallel for file-backed segmentation. `centring_final` is one of
+`centred`, `off_centre`, or `insufficient_support`. The provisional tolerance is
+`max(0.75 voxel, 0.15 * short semi-axis)`. A stationary curve that fails this audit
+is not reported as converged. These metrics measure agreement with segmentation,
+not recovery of an unknown undeformed anatomical centreline.
+Degree-two joins also receive a tangent-continuity audit; a unit-vector residual
+above 0.001 prevents a convergence claim. Branching nodes are not forced to share
+one direction. Nearest-voxel section sampling has a resolution floor: a reported
+zero section offset does not establish zero subvoxel error.
+
+Geometry-only outputs retain radius placeholders. Remeasure through the shared
+section filter after geometry review, then derive reconstruction profiles and
+apply optional smooth clearance correction. Containment of a centreline does
+not certify containment or nonintersection of reconstructed circular surfaces.
 
 ## Optional reconstruction layout
 

@@ -21,7 +21,8 @@ from .interpolation import mask_for_segment
 from .radius_perimeter import _BranchContext as _BranchContext, _rival_lies_in_blob
 from .section_validation import SectionContext
 
-METHODS = ("none", "centroid-spline", "centroid-coherent", "dfs-centroid", "laplacian", "taubin")
+METHODS = ("none", "centroid-spline", "centroid-coherent", "dfs-centroid",
+           "dfs-centroid-shape", "laplacian", "taubin")
 
 
 def arclength(x):
@@ -230,6 +231,7 @@ class RefinementReport:
     segments: dict = field(default_factory=dict)
     neighbourhoods: dict = field(default_factory=dict)
     path_plan: list = field(default_factory=list)
+    junction_geometry: dict = field(default_factory=dict)
 
     def to_dict(self):
         return asdict(self)
@@ -246,7 +248,8 @@ def _open_worker(labels, frame, local):
 _SECTION_WORKER = None
 
 
-def _init_section_worker(triple, frame, lattice, scale, max_half, max_samples, coherent):
+def _init_section_worker(triple, frame, lattice, scale, max_half, max_samples, coherent,
+                         shape_aware=False, tangent_hints=None):
     import cv2
     from threadpoolctl import threadpool_limits
     threadpool_limits(limits=1)
@@ -257,17 +260,18 @@ def _init_section_worker(triple, frame, lattice, scale, max_half, max_samples, c
     graph = EditableGraph(triple)
     labels = open_lattice(*lattice[:3], cache_dir=lattice[3])
     _SECTION_WORKER = (graph, frame, _PlaneSampler(labels, frame), SectionContext(graph),
-                       scale, max_half, max_samples, coherent)
+                       scale, max_half, max_samples, coherent, shape_aware, tangent_hints or {})
 
 
-def _section_work(sid):
-    graph, frame, sampler, context, scale, max_half, max_samples, coherent = _SECTION_WORKER
+def _section_work(sid, audit=False):
+    (graph, frame, sampler, context, scale, max_half, max_samples, coherent,
+     shape_aware, tangent_hints) = _SECTION_WORKER
     start, diagnostics = time.monotonic(), {}
-    if len(graph.coords(sid)) < 4:
+    if len(graph.coords(sid)) < 4 and not audit:
         result = (graph.coords(sid).copy(), np.zeros(len(graph.coords(sid))), [], [])
     else:
         result = _targets(graph, sid, frame, sampler, context, scale[sid], max_half,
-                          max_samples, coherent, diagnostics)
+                          max_samples, coherent, diagnostics, shape_aware, tangent_hints.get(sid))
     return sid, result, diagnostics, time.monotonic()-start
 
 
@@ -290,14 +294,15 @@ def _crosses_section(graph, sid, origin, tangent, cut, spacing):
 
 
 def _targets(graph, sid, frame, sampler, ctx, scale, max_half, max_samples,
-             coherent=False, diagnostics=None):
+             coherent=False, diagnostics=None, shape_aware=False, tangent_hint=None):
     x = graph.coords(sid)
     n = len(x)
     target, weights = x.copy(), np.zeros(n)
     sp = float(frame.seg_spacing[0])
     s = arclength(x)
     scale = np.broadcast_to(scale, (n,))
-    tangents = robust_edge_tangents(x, scale, spacing_um=sp)
+    tangents = (robust_edge_tangents(x, scale, spacing_um=sp)
+                if tangent_hint is None else tangent_hint)
     ids = np.unique(np.searchsorted(s, np.linspace(0., s[-1], min(n, max_samples))))
     invented = mask_for_segment(graph, sid)
     accepted, measured_scale = [], []
@@ -321,14 +326,50 @@ def _targets(graph, sid, frame, sampler, ctx, scale, max_half, max_samples,
         # Unresolved regions receive curve support from exclusive sections.
         centre = np.argwhere(c.blob8).mean(axis=0)-c.half
         candidate = x[i] + sp*(centre[0]*c.u + centre[1]*c.v)
+        shape = None
+        if shape_aware:
+            from .section_shape import section_shape
+            shape = section_shape(c, sp)
+            shape.update(point=int(i), accepted=False, normal=chosen.tangent.tolist())
+            if diagnostics is not None:
+                diagnostics.setdefault('section_shapes', []).append(shape)
+            if not shape['centroid_inside']:
+                shape['reason'] = 'centroid_outside_selected_lumen'
+                continue
         if not np.all(sampler.at(line_samples_ijk(frame.um_to_seg(x[i])[0],
                                                  frame.um_to_seg(candidate)[0])) > 0):
+            if shape is not None:
+                shape['reason'] = 'centroid_movement_crosses_background'
             continue
         target[i] = candidate
         weights[i] = 1/(1+chosen.centroid_ratio**2)
+        if shape is not None:
+            shape['accepted'] = True
+            # Flattening alone never reduces confidence. Penalise instability
+            # and disagreement only; ellipse geometry never replaces the mask.
+            disagreement = (shape['ellipse_centroid_disagreement_um']
+                            if shape['ellipse_status'] == 'diagnostic_only' else 0.)
+            weights[i] /= 1 + (disagreement/max(sp, shape['minor_semiaxis_um']))**2
+            weights[i] /= 1 + (chosen.area_ratio-1)**2 + (chosen.perimeter_ratio-1)**2
+            shape['weight'] = float(weights[i])
         accepted.append(int(i))
         measured_scale.append(float(np.sqrt(c.blob8.sum()/np.pi)*sp))
     return target, weights, accepted, measured_scale
+
+
+def _supported_tangent_hint(x, scale, observation, spacing):
+    """Use exclusive section centroids to guide directions over physical spans."""
+    target, _, good, _ = observation
+    if len(good) < 2:
+        return None
+    s = arclength(x)
+    if np.ptp(s[good]) < spacing:
+        return None
+    # Interpolate the correction field rather than replacing a curved vessel by
+    # straight chords between sparsely sampled centroids. No endpoint extrapolation.
+    delta = target[good]-x[good]
+    correction = np.column_stack([np.interp(s, s[good], delta[:, k]) for k in range(3)])
+    return robust_edge_tangents(x+correction, scale, spacing_um=spacing)
 
 
 def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
@@ -362,9 +403,10 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                                       for x in original.values())
     scale = {sid: np.maximum(2*sp, graph.radii(sid).copy()) for sid in sids}
     held = set(fixed_nodes) | {nid for nid in graph.nodes if graph.degree(nid) == 1}
-    dfs = method == 'dfs-centroid'
+    shape_aware = method == 'dfs-centroid-shape'
+    dfs = method in ('dfs-centroid', 'dfs-centroid-shape')
     centroid = method.startswith('centroid-') or dfs
-    coherent = method in ('centroid-coherent', 'dfs-centroid')
+    coherent = method in ('centroid-coherent', 'dfs-centroid', 'dfs-centroid-shape')
     if dfs:
         from .dfs_paths import root_paths
         report.path_plan = root_paths(graph, root_nodes)
@@ -375,6 +417,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
     stable_rounds = 0
     previous_moves = {}
     previous_support = {}
+    tangent_hints = {}
     segment_stable_rounds = {sid: 0 for sid in sids}
     from ..rle import ByteRLELattice, RawLattice
     process_sections = workers > 1 and isinstance(labels, (ByteRLELattice, RawLattice))
@@ -390,7 +433,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
             if section_cache is not None:
                 section_cache.refresh(graph)
             for sid in sids:
-                cached = section_cache.get(sid, scale[sid]) if section_cache is not None else None
+                cached = section_cache.get(sid, scale[sid], extra=tangent_hints.get(sid)) if section_cache is not None else None
                 if cached is None:
                     pending.append(sid)
                 else:
@@ -406,7 +449,8 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                     return sid, (before[sid].copy(), np.zeros(len(before[sid])), [], [])
                 return sid, _targets(graph, sid, frame, local.sampler, ctx, scale[sid],
                                      max_half, max_samples, coherent,
-                                     diagnostics=section_diagnostics[sid])
+                                     diagnostics=section_diagnostics[sid], shape_aware=shape_aware,
+                                     tangent_hint=tangent_hints.get(sid))
 
             if process_sections and pending:
                 lattice = (labels.path, labels.field, labels.dims, getattr(labels, '_cache_dir', None))
@@ -414,7 +458,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                         mp_context=multiprocessing.get_context('spawn'),
                         initializer=_init_section_worker,
                         initargs=(graph.triple, frame, lattice, scale, max_half, max_samples,
-                                  coherent)) as processes:
+                                  coherent, shape_aware, tangent_hints)) as processes:
                     futures = [processes.submit(_section_work, sid) for sid in pending]
                     for future in as_completed(futures):
                         sid, result, diagnostics, seconds = future.result()
@@ -455,6 +499,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                 with graph.batch('longest path first fitting'):
                     report.neighbourhoods = fit_paths(graph, report.path_plan, sids,
                         observations, scale, sampler, frame, strength, held,
+                        section_weighting=shape_aware,
                         progress=(lambda row: path_progress(dict(iteration=iteration+1, **row)))
                         if path_progress else None)
                 completed = {sid for row in report.neighbourhoods.values()
@@ -562,6 +607,13 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                                        accepted_sections=accepted_total, blocked_segments=blocked,
                                        oscillating_segments=oscillations,
                                        changed_support_segments=support_changes))
+            if shape_aware:
+                from .section_shape import centring_summary
+                for sid in sids:
+                    report.segments[sid]['centring_observation'] = centring_summary(
+                        section_diagnostics[sid].get('section_shapes', []), sp)
+                tangent_hints = {sid: hint for sid in sids if (hint := _supported_tangent_hint(
+                    before[sid], scale[sid], observations[sid], sp)) is not None}
             if progress:
                 progress(report.history[-1])
             curve_supported = {sid for sid in sids if len(observations[sid][2]) >= 2}
@@ -593,6 +645,49 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                 break
             if peak < 1e-9 and (not supported or blocked):
                 break
+    if shape_aware:
+        # Fresh observations on FINAL geometry: previous iteration's section
+        # centres do not certify centring after a joint node/curve update.
+        from .section_shape import centring_summary, curve_diagnostics
+        def audits():
+            if process_sections and sids:
+                lattice = (labels.path, labels.field, labels.dims, getattr(labels, '_cache_dir', None))
+                with ProcessPoolExecutor(max_workers=min(workers, len(sids)),
+                        mp_context=multiprocessing.get_context('spawn'),
+                        initializer=_init_section_worker,
+                        initargs=(graph.triple, frame, lattice, scale, max_half, max_samples,
+                                  True, True, {})) as processes:
+                    futures = [processes.submit(_section_work, sid, True) for sid in sids]
+                    for future in as_completed(futures):
+                        sid, _, diagnostics, seconds = future.result()
+                        yield sid, diagnostics, seconds
+            else:
+                final_context = SectionContext(graph)
+                for sid in sids:
+                    start = time.monotonic()
+                    diagnostics = {}
+                    _targets(graph, sid, frame, sampler, final_context, scale[sid], max_half,
+                             max_samples, True, diagnostics, True)
+                    yield sid, diagnostics, time.monotonic()-start
+        for sid, diagnostics, seconds in audits():
+            row = report.segments.setdefault(sid, {})
+            row['centring_final'] = centring_summary(diagnostics.get('section_shapes', []), sp)
+            row['final_section_diagnostics'] = diagnostics
+            row['curve_geometry'] = curve_diagnostics(graph.coords(sid))
+            if section_progress:
+                section_progress(dict(stage='centring_audit', iteration=report.iterations,
+                    segment=sid, accepted_sections=row['centring_final']['accepted_sections'],
+                    seconds=seconds))
+            if row['centring_final']['status'] != 'centred':
+                row['converged'] = False
+                report.converged = False
+        from .section_shape import join_diagnostics
+        report.junction_geometry = join_diagnostics(graph, sids)
+        for row in report.junction_geometry.values():
+            if row['status'] != 'continuous':
+                report.converged = False
+                for sid in row['segments']:
+                    report.segments[sid]['converged'] = False
     for sid in sids:
         x = graph.coords(sid)
         dist = np.linalg.norm(x-original[sid], axis=1)

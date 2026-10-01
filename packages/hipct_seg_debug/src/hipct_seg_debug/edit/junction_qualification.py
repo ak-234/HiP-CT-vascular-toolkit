@@ -100,8 +100,8 @@ def evaluate(args, target=None):
                            workers=args.workers,
                            reuse_sections=not getattr(args, 'no_section_cache', False),
                            checkpoint=checkpoint,
-                           section_progress=lambda row: print(json.dumps(dict(region=target,
-                               stage='section_support', **row)), flush=True),
+                           section_progress=lambda row: print(json.dumps(dict(
+                               {'region': target, 'stage': 'section_support'}, **row)), flush=True),
                            path_progress=lambda row: print(json.dumps(dict(region=target,
                                stage='path_fit', **row)), flush=True),
                            progress=lambda row: print(json.dumps(dict(region=target, **row)), flush=True)).to_dict()
@@ -193,7 +193,7 @@ def main(argv=None):
     parser.add_argument('--out-dir', required=True)
     parser.add_argument('--segment', type=int, action='append', default=[])
     parser.add_argument('--fixed-node', type=int, action='append', default=[])
-    parser.add_argument('--method', choices=('centroid-coherent', 'dfs-centroid'), default='centroid-coherent')
+    parser.add_argument('--method', choices=('centroid-coherent', 'dfs-centroid', 'dfs-centroid-shape'), default='centroid-coherent')
     parser.add_argument('--root-node', type=int, action='append', default=[])
     parser.add_argument('--roots-json', default=None)
     parser.add_argument('--workers', type=int, default=8)

@@ -96,6 +96,14 @@ class SectionContext:
             ids_near = np.flatnonzero(distance < radius)
             if not len(ids_near):
                 continue
+            # Every tested line includes its foreign-axis endpoint. Exclude
+            # endpoints already known to be background in one batch, rather
+            # than building thousands of rays that must fail at their last voxel.
+            # This is exactly the same acceptance predicate, not a relaxation.
+            axis_foreground = sampler.at(frame.um_to_seg(centre[ids_near])) > 0
+            ids_near = ids_near[axis_foreground]
+            if not len(ids_near):
+                continue
             # Start at the most central candidate, but inspect every possible
             # foreground connection until one proves shared lumen support.
             for j in ids_near[np.argsort(distance[ids_near])]:

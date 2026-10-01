@@ -85,3 +85,37 @@ the complete junction neighbourhoods and branch correspondence against the
 segmentation before choosing geometry, then remeasure with the shared section
 filter. Neither the three clinical target regions nor a full tree have been
 qualified with this backend. Do not use its output directly as a final surface.
+
+## Centroid/curvature hybrid and VMTK comparison
+
+`--algorithms jin-mcp,jin-mcp-centroid` writes separate raw and refined candidates.
+The hybrid applies `dfs-centroid-shape` after Jin extraction, with
+`--jin-refine-iterations 5` by default. Its section-centre data term and curvature
+term favour a coherent centred curve; they do **not** modify Jin's published
+shortest-path cost. Each stage has a separate report. Refinement preserves the
+extracted topology and radii, so it does not silently remove medial-sheet branches.
+The hybrid uses the refinement stage's automatic graph roots and fixed terminals;
+the extraction root can be an interior voxel that is not an exported graph node.
+For controlled anatomical roots, refine the exported graph separately with an
+explicit root sidecar. See [CENTRELINE_REFINEMENT.md](CENTRELINE_REFINEMENT.md).
+
+An optional `--algorithms vmtk` adapter provides an independent surface-based
+baseline when VMTK is installed. It requires one connected ROI (omit `--per-tree`)
+and explicit world-coordinate seeds:
+
+```powershell
+python -m hipct_seg_debug.edit skeletonise-all --seg region.am --algorithms vmtk --vmtk-source-xyz 100 200 300 --vmtk-target-xyz 900 200 300 --no-score --out-dir runs/vmtk-region
+```
+
+Replace these illustrative coordinates with suitable inlet/outlet surface seeds.
+Repeat `--vmtk-target-xyz` for additional outlets. Following VMTK's point-list
+interface, seeds snap to the nearest surface vertex. The adapter extracts a
+marching-cubes surface with an exterior background layer, without mesh smoothing
+or centreline resampling. Cropping introduces artificial caps. VMTK's radii are
+maximal-inscribed-sphere values, requiring separate perimeter remeasurement.
+The resulting graph still requires containment and centring checks.
+
+VMTK is not installed in the development environment. The optional integration
+test therefore skips; no VMTK accuracy or timing result is claimed. A missing
+dependency is reported explicitly. The adapter does not install or substitute
+another algorithm automatically.
