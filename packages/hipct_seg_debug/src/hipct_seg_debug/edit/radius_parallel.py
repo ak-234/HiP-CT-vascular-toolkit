@@ -30,15 +30,15 @@ def _init_worker(triple, frame, lattice, options):
         labels = open_lattice(path, field, dims, cache_dir=cache)
     else:
         labels = lattice
-    _WORKER = EditableGraph(triple), frame, labels, options
+    _WORKER = EditableGraph(triple), frame, labels, options, {}
 
 
 def _measure_batch(sids):
     from .radius_perimeter import measure_radii
 
-    graph, frame, labels, options = _WORKER
+    graph, frame, labels, options, cache = _WORKER
     return measure_radii(graph, frame, labels, _segment_ids=sids, _raw_only=True,
-                         **options)
+                         _worker_cache=cache, **options)
 
 
 def measure_provisional(graph, frame, labels, sids, *, workers, options, progress=None):
@@ -80,6 +80,8 @@ def measure_provisional(graph, frame, labels, sids, *, workers, options, progres
             result, partial = combined["result"], raw["result"]
             result.n_truncated += partial.n_truncated
             result.n_ownership_failed += partial.n_ownership_failed
+            result.section_rejection_counts.update(partial.section_rejection_counts)
+            result.section_target_obliquity_degrees.update(partial.section_target_obliquity_degrees)
             result.junction_lengths_um.extend(partial.junction_lengths_um)
             done += len(batch)
             if progress is not None:

@@ -62,7 +62,7 @@ def _build_index(buf: np.ndarray, slice_nbytes: np.int64, n_slices: np.int64):
     return offsets, discards, out
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _decode(buf: np.ndarray, start: np.int64, discard: np.int64, want: np.int64):
     """Decode ``want`` output bytes starting ``discard`` bytes into the packet at ``start``."""
     res = np.empty(want, dtype=np.uint8)

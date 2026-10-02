@@ -523,7 +523,7 @@ class EditableGraph:
             for end, which in ((0, "node1"), (-1, "node2")):
                 nid = seg[which]
                 node = self.nodes.get(nid)
-                if node is None or np.allclose(xyz[end], node[:3]):
+                if node is None or np.array_equal(xyz[end], node[:3]):
                     continue
                 self._move_node(nid, xyz[end])
                 for other in list(self.node_segments(nid)):
