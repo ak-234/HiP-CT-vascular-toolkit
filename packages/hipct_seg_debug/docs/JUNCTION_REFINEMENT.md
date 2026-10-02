@@ -259,12 +259,13 @@ foreground witness, axis distance and radius that triggered contamination.
 `--point INDEX` selects individual points. `--slab-half-span FRACTION` is only a
 sensitivity experiment and never writes a corrected graph.
 
-Two unresolved issues are documented by that investigation:
+Two issues were documented by that investigation (the first synthetic defect is
+addressed by the endpoint-support correction described below):
 
 - Finite foreign tubes use individual sampled edge directions. A synthetic axial
   continuation with a half-voxel endpoint kink falsely contaminates an upstream
-  plane, while the straight version passes. A strict expected-failure regression
-  records this defect until finite branch support is made robust to point noise.
+  plane, while the straight version passes. This initially had a strict
+  expected-failure regression; it now passes without that marker.
 - Reducing the slab half-span from 0.5 to 0.125 input radii recovered one section
   on 3655, but its ownership partition retained only 49.1% of the unpartitioned
   perimeter at the **same orientation** (3877 versus 7892 micrometres). Stability
@@ -299,7 +300,8 @@ insufficient-support rejection across candidate orientations; 3655 recorded 72
 neighbouring-lumen rejections. These are candidate counts, not 71/72 independent
 cross-sections. Missing support was not replaced with invented measurements.
 
-A subsequent read-only audit sampled every point on 3612 and 3655. It found
+A subsequent read-only audit requested as many samples as points on 3612 and
+3655. It found
 accepted sections at points 22 and 23 on 3612, between the coarse audit stations,
 but both were off centre: maximum offset 333.10 micrometres, or 0.878 short
 semi-axes. No section was accepted on 3655. This diagnostic used stored radii for
@@ -307,7 +309,9 @@ initial section/tangent scales rather than the refinement's iteratively measured
 scales, so it is not an exact resampling of the earlier audit. It demonstrates
 that the coarse sampling can miss a narrow support window; it does not qualify
 3612. Production defaults use 32 stations, and neither sparse audit establishes
-centring along the entire curve.
+centring along the entire curve. The dense-sampling bug discovered below also
+affected this diagnostic: requesting that budget did not actually visit every
+point on an unevenly sampled curve.
 
 Exported graphs preserve IDs, connectivity, shared endpoint coordinates, fixed
 roots/terminals, numeric radii and unselected geometry. Exact edge traversal found
@@ -320,3 +324,115 @@ remeasurement and surface qualification have not been performed on these outputs
 The implemented Jin hybrid is a post-extraction centroid/curvature fit, not a
 modified Jin shortest-path cost. The optional VMTK baseline remains unexecuted
 because its dependency is absent. See `JIN_MCP.md` for these distinctions.
+
+## Rejected-section and sampling fixes (2026-10-01)
+
+The finite foreign-tube model now clips endpoint-local support using an inward
+chord over physical arclength, rather than allowing a tiny first-edge kink to
+project the tube backwards. Each endpoint cap applies only within two endpoint
+radii, limited to half the branch length. Distant returning curves retain their
+support. This is a bounded geometric model using stored calibre, not a claim that
+the cap is an observed anatomical boundary. Angles alone still do not reject a
+section; candidate overlap and the foreground connection remain required.
+
+The former axial-continuation expected failure now passes, including reversed
+directions and point subdivision. Tests also retain detection of a curved return,
+a parallel contaminating daughter, overlap without an axis crossing, and a
+spatially separate daughter with an overestimated radius.
+
+A second defect affected dense audits: mapping N uniformly spaced arclength
+stations to N exported points could repeat indices and skip tightly sampled
+points. A budget covering the point count now visits every non-invented point
+directly; lower budgets still use physical arclength. Section diagnostics record
+the actual sampled indices. A regression exercises a tightly sampled window.
+
+On the unchanged 3612/3655 geometry, a true every-point before/after comparison
+using identical stored-radius scales found:
+
+| Target | Before endpoint correction | After endpoint correction |
+|---|---|---|
+| 3612 | Points 21-24 accepted; max offset 344.44 um | Points 18 and 21-24 accepted; max offset 366.85 um |
+| 3655 | No accepted points | No accepted points |
+
+All accepted 3612 points remain off centre. The larger maximum after correction
+comes from newly exposed support, not a geometry change. At 3655 point 22, the
+fitted orientation still encounters incident branches 794 and 3661 on its +0.5
+radius companion plane, plus non-incident branch 1046 on other planes. The cap
+correction does not remove those witnesses. Ownership remains unresolved; no
+slab-width or contamination-threshold relaxation has been adopted.
+
+The regional runner accepts `--dense-target-sections`: every non-invented point
+on each requested `--segment` is sampled during fitting and final auditing,
+while neighbouring segments retain `--max-samples`. Full graph context and the
+joint neighbourhood fit are unchanged. This avoids paying for dense sections
+on every neighbouring branch when investigating a narrow target support window.
+For example:
+
+```powershell
+python -m hipct_seg_debug.edit.junction_qualification --graph INPUT.am --seg LABELS.am --segment 3612 --segment 3655 --method dfs-centroid-shape --dense-target-sections --max-samples 8 --workers 8 --max-iterations 2 --geometry-only --out-dir runs/dense_target_review
+```
+
+Use the dataset's established `--root-node`/`--roots-json` configuration as well.
+Dense checks of the unchanged control graphs retained identical decisions before
+and after the endpoint fix: 318 was centred at 11 accepted points, but 4390 was
+off centre at three of 13 accepted points (maximum offset 137.01 micrometres).
+The earlier coarse control audit had missed these failures. An accepted sample
+is not a certificate of centring along the entire curve.
+
+The targeted dense experiment then completed two additional fitting iterations
+on the 33-segment 3612/3655 neighbourhood in 513.56 seconds. All 46 points of
+3612 and all 31 points of 3655 were attempted; neighbours used eight stations.
+The final audit accepted 16 sections on 3612, all within provisional tolerance,
+with maximum offset 42.80 micrometres. A separate check of the exported geometry
+using the original stored-radius sampling scales accepted eight sections, with
+maximum offset 39.50 micrometres, also within tolerance. This supports a centring
+improvement on observed exclusive sections, not a whole-vessel accuracy claim.
+Segment 3655 still had no accepted sections. The full neighbourhood did not
+converge: the second pass reported six oscillating segments and 18 blocked
+segments. Numeric radii and structural invariants were preserved, and exact
+edge traversal found no new exits (12 existing outside edges before and after).
+Radii have not been remeasured. A preceding run with 64 stations on every
+neighbour was stopped before completing its first fit and was not used as a
+geometry result.
+
+## Complex-junction topology audit (2026-10-02)
+
+The refinement preserves imported connectivity. It can move a shared node but
+does not independently identify which branches anatomically join. Misassigned
+connectivity or several graph nodes representing one junction can therefore
+persist through refinement.
+
+A read-only audit identifies short links between branching nodes and records
+their section evidence. The provisional proximity limit is the sum of stored
+endpoint radii; these radii may themselves be inaccurate in flattened vessels.
+Only links with an explicit final audit reporting zero accepted sections are
+grouped as unresolved complexes. Missing audit evidence is distinct from zero
+support, and observed exclusive sections keep two nodes separate in this
+diagnostic. Direct nodes with four or more incident branches are also reported.
+
+```powershell
+python -m hipct_seg_debug.edit.junction_topology_audit --graph REGION/geometry.am --geometry-report REGION/geometry.json --out REGION/junction_topology.json
+```
+
+The graph and report must describe the same geometry. The audit exports node
+degrees, endpoint consistency, short-link lengths, external branch IDs and input
+fingerprints. It never merges nodes or changes the graph. Six tests cover
+three-to-six-way nodes, reversed edges, reordered records, absent versus negative
+section evidence, supported connectors and graph preservation.
+
+The known failure regions contain concrete candidates:
+
+| Region | Candidate nodes | Internal links | External branches |
+|---|---|---|---|
+| Near 3717 | 3713, 3716 | 3716 (498.58 um; no accepted sections in the coarse audit) | 3593, 3643, 3715, 3717 |
+| Around 3655 | 1547, 3333, 3588 | 3655 and 3661 (1654.18 and 2082.60 um; no accepted sections) | 794, 2200, 2974, 3648, 3667 |
+
+The first has four external approaches and the second five. Either may describe
+closely spaced bifurcations rather than one multifurcation. These are candidates
+for segmentation review, not proof that the imported topology is wrong. In
+contrast, 3612's short connector now has exclusive-section support and is not
+grouped by this criterion. Native-voxel segmentation surfaces with every incident
+branch and node label were generated locally for review. The next topology
+decision requires tracing those approaches through the segmentation and comparing
+one-junction and multiple-junction hypotheses; radius-based proximity alone must
+not author a connectivity change.

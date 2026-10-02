@@ -25,6 +25,29 @@ class SectionVerdict:
     cuts: list | None = None
 
 
+def _endpoint_support(x, radii, arc):
+    """Finite end planes from physical branch spans, not a noisy first edge.
+
+    Only the adjacent two-radius span (at most half the branch) uses each cap.
+    Distant bends may return across the plane and must retain their own support.
+    Interpolation in arclength makes the model independent of point density.
+    These planes constrain spatial tube extent; they are not angular gates.
+    """
+    caps = []
+    for end in (0, -1):
+        radius = float(radii[end])
+        width = min(2*max(radius, 0.), arc[-1]/2) if np.isfinite(radius) else 0.
+        if width <= 1e-8:
+            continue
+        position = width if end == 0 else arc[-1]-width
+        anchor = np.array([np.interp(position, arc, x[:, k]) for k in range(3)])
+        inward = anchor-x[end]
+        norm = float(np.linalg.norm(inward))
+        if norm > 1e-8:
+            caps.append((end, x[end], inward/norm, width))
+    return caps
+
+
 class SectionContext:
     def __init__(self, graph):
         self.graph = graph
@@ -39,15 +62,22 @@ class SectionContext:
             if len(incident) == 2:
                 parent[root(incident[1])] = root(incident[0])
         self.continuation = {sid: root(sid) for sid in parent}
-        records = []
+        records, arcs = [], []
+        self.end_support, self.lengths = {}, {}
         for sid in sorted(graph.segment_ids()):
             x, r = graph.coords(sid), graph.radii(sid)
+            arc = np.r_[0., np.cumsum(np.linalg.norm(np.diff(x, axis=0), axis=1))]
+            if len(x) >= 2:
+                self.end_support[sid] = _endpoint_support(x, r, arc)
+                self.lengths[sid] = float(arc[-1])
             for i, (a, b) in enumerate(zip(x[:-1], x[1:])):
                 length = float(np.linalg.norm(b-a))
                 if length > 1e-8 and np.isfinite(r[i:i+2]).all():
                     records.append((sid, a, b, max(float(r[i]), 0.),
                                     max(float(r[i+1]), 0.), length))
+                    arcs.append(float(arc[i]))
         self.records = records
+        self.record_arcs = np.asarray(arcs)
         self.buckets = []
         if records:
             centres = np.array([(v[1]+v[2])/2 for v in records])
@@ -87,6 +117,11 @@ class SectionContext:
                 continue
             along = (points-a) @ direction
             inside = (along >= -1e-8) & (along <= length+1e-8)
+            branch_arc = self.record_arcs[index]+along
+            for end, endpoint, inward, width in self.end_support[other]:
+                distance_from_end = branch_arc if end == 0 else self.lengths[other]-branch_arc
+                inside &= ((distance_from_end > width) |
+                           ((points-endpoint) @ inward >= -1e-8))
             if not inside.any():
                 continue
             ids = np.flatnonzero(inside)
@@ -117,6 +152,7 @@ class SectionContext:
                         edge_start_um=a.tolist(), edge_end_um=b.tolist(),
                         overlap_point_um=points[ids[j]].tolist(),
                         branch_axis_point_um=centre[j].tolist(),
+                        branch_axis_arclength_um=float(branch_arc[ids[j]]),
                         branch_radius_um=float(radius[j]), axis_distance_um=float(distance[j]),
                         tangent_plane_angle_degrees=float(np.degrees(np.arcsin(
                             np.clip(abs(normal @ direction), 0, 1)))))

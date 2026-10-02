@@ -101,6 +101,8 @@ def evaluate(args, target=None):
         geometry = refine(graph, frame, labels, method=getattr(args, 'method', 'centroid-coherent'), sids=selected,
                            fixed_nodes=set(args.fixed_node) | roots, root_nodes=roots, strength=.01,
                            max_iterations=args.max_iterations, max_samples=args.max_samples,
+                           dense_sids=set(args.segment).intersection(selected)
+                               if getattr(args, 'dense_target_sections', False) else (),
                            workers=args.workers,
                            reuse_sections=not getattr(args, 'no_section_cache', False),
                            checkpoint=checkpoint,
@@ -205,6 +207,9 @@ def main(argv=None):
                         help='disable exact section reuse for benchmarking')
     parser.add_argument('--max-iterations', type=int, default=25)
     parser.add_argument('--max-samples', type=int, default=16)
+    parser.add_argument('--dense-target-sections', action='store_true',
+                        help='sample every point on requested target segments during fitting and final audit; '
+                             'neighbours retain --max-samples and full branch context')
     parser.add_argument('--cells-across-diameter', type=float, default=8.)
     parser.add_argument('--maximum-cells', type=int, default=5_000_000)
     parser.add_argument('--full-tree', action='store_true', help='run full tree only after every selected region qualifies')

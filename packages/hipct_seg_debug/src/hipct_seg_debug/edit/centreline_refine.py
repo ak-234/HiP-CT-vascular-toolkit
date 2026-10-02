@@ -249,7 +249,7 @@ _SECTION_WORKER = None
 
 
 def _init_section_worker(triple, frame, lattice, scale, max_half, max_samples, coherent,
-                         shape_aware=False, tangent_hints=None):
+                         shape_aware=False, tangent_hints=None, dense_sids=()):
     import cv2
     from threadpoolctl import threadpool_limits
     threadpool_limits(limits=1)
@@ -260,18 +260,19 @@ def _init_section_worker(triple, frame, lattice, scale, max_half, max_samples, c
     graph = EditableGraph(triple)
     labels = open_lattice(*lattice[:3], cache_dir=lattice[3])
     _SECTION_WORKER = (graph, frame, _PlaneSampler(labels, frame), SectionContext(graph),
-                       scale, max_half, max_samples, coherent, shape_aware, tangent_hints or {})
+                       scale, max_half, max_samples, coherent, shape_aware, tangent_hints or {}, set(dense_sids))
 
 
 def _section_work(sid, audit=False):
     (graph, frame, sampler, context, scale, max_half, max_samples, coherent,
-     shape_aware, tangent_hints) = _SECTION_WORKER
+     shape_aware, tangent_hints, dense_sids) = _SECTION_WORKER
     start, diagnostics = time.monotonic(), {}
     if len(graph.coords(sid)) < 4 and not audit:
         result = (graph.coords(sid).copy(), np.zeros(len(graph.coords(sid))), [], [])
     else:
         result = _targets(graph, sid, frame, sampler, context, scale[sid], max_half,
-                          max_samples, coherent, diagnostics, shape_aware, tangent_hints.get(sid))
+                          len(graph.coords(sid)) if sid in dense_sids else max_samples,
+                          coherent, diagnostics, shape_aware, tangent_hints.get(sid))
     return sid, result, diagnostics, time.monotonic()-start
 
 
@@ -303,13 +304,19 @@ def _targets(graph, sid, frame, sampler, ctx, scale, max_half, max_samples,
     scale = np.broadcast_to(scale, (n,))
     tangents = (robust_edge_tangents(x, scale, spacing_um=sp)
                 if tangent_hint is None else tangent_hint)
-    ids = np.unique(np.searchsorted(s, np.linspace(0., s[-1], min(n, max_samples))))
+    # A dense audit must actually visit every exported point. Mapping n uniform
+    # arclength stations back to indices can duplicate sparse intervals and skip
+    # tightly sampled points, including narrow windows of exclusive support.
+    ids = (np.arange(n) if max_samples >= n else
+           np.unique(np.searchsorted(s, np.linspace(0., s[-1], max_samples))))
     invented = mask_for_segment(graph, sid)
+    if len(invented) == n:
+        ids = ids[~invented[ids]]
+    if diagnostics is not None:
+        diagnostics['sampled_points'] = ids.tolist()
     accepted, measured_scale = [], []
     section_context = ctx if isinstance(ctx, SectionContext) else SectionContext(graph)
     for i in ids:
-        if len(invented) == n and invented[i]:
-            continue
         chosen = stable_transverse_cut(
             sampler, frame.um_to_seg(x[i])[0], tangents[i], max(scale[i]/sp, 2.),
             spacing_um=sp, max_half=max_half, centroid_mode="drift",
@@ -376,12 +383,14 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
            fixed_nodes=(), move_junctions=True, strength=.1, max_iterations=25,
            max_half=256, max_samples=32, workers=1, progress=None,
            section_progress=None, checkpoint=None, reuse_sections=True, root_nodes=(),
-           path_progress=None):
+           path_progress=None, dense_sids=()):
     """Refine selected segments with full-graph branch context, preserving radii.
 
     Junctions move only when every incident segment participates. Overlapping
     neighbourhoods share their external section support. Roots and terminals
     remain anchored; insufficiently supported neighbourhoods are reported.
+    ``dense_sids`` visits every non-invented point on those selected segments
+    during fitting and final auditing; other branches retain the sample budget.
     """
     if method not in METHODS:
         raise ValueError(f"unknown refinement method: {method}")
@@ -394,6 +403,10 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
     sids = list(graph.segment_ids()) if sids is None else sorted(set(map(int, sids)))
     if any(not graph.has_segment(sid) for sid in sids):
         raise ValueError("unknown segment id")
+    dense_sids = set(map(int, dense_sids))
+    if not dense_sids <= set(sids):
+        raise ValueError("dense sections must belong to the selected segments")
+    sample_limits = {sid: len(graph.coords(sid)) if sid in dense_sids else max_samples for sid in sids}
     sp = float(frame.seg_spacing[0])
     original = {sid: graph.coords(sid).copy() for sid in sids}
     radius_snapshot = {sid: graph.radii(sid).copy() for sid in graph.segment_ids()}
@@ -448,7 +461,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                 if len(before[sid]) < 4:
                     return sid, (before[sid].copy(), np.zeros(len(before[sid])), [], [])
                 return sid, _targets(graph, sid, frame, local.sampler, ctx, scale[sid],
-                                     max_half, max_samples, coherent,
+                                     max_half, sample_limits[sid], coherent,
                                      diagnostics=section_diagnostics[sid], shape_aware=shape_aware,
                                      tangent_hint=tangent_hints.get(sid))
 
@@ -458,7 +471,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                         mp_context=multiprocessing.get_context('spawn'),
                         initializer=_init_section_worker,
                         initargs=(graph.triple, frame, lattice, scale, max_half, max_samples,
-                                  coherent, shape_aware, tangent_hints)) as processes:
+                                  coherent, shape_aware, tangent_hints, dense_sids)) as processes:
                     futures = [processes.submit(_section_work, sid) for sid in pending]
                     for future in as_completed(futures):
                         sid, result, diagnostics, seconds = future.result()
@@ -524,7 +537,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                 target, weights, good, measured = observations[sid]
                 accepted_total += len(good)
                 report.segments[sid] = dict(accepted_sections=len(good),
-                                            sampled_points=min(len(x), max_samples),
+                                            sampled_points=len(section_diagnostics[sid].get('sampled_points', [])),
                                             section_diagnostics=section_diagnostics[sid],
                                             section_scale_um=float(np.median(scale[sid])))
                 if sid in deferred:
@@ -656,7 +669,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                         mp_context=multiprocessing.get_context('spawn'),
                         initializer=_init_section_worker,
                         initargs=(graph.triple, frame, lattice, scale, max_half, max_samples,
-                                  True, True, {})) as processes:
+                                  True, True, {}, dense_sids)) as processes:
                     futures = [processes.submit(_section_work, sid, True) for sid in sids]
                     for future in as_completed(futures):
                         sid, _, diagnostics, seconds = future.result()
@@ -667,7 +680,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                     start = time.monotonic()
                     diagnostics = {}
                     _targets(graph, sid, frame, sampler, final_context, scale[sid], max_half,
-                             max_samples, True, diagnostics, True)
+                             sample_limits[sid], True, diagnostics, True)
                     yield sid, diagnostics, time.monotonic()-start
         for sid, diagnostics, seconds in audits():
             row = report.segments.setdefault(sid, {})

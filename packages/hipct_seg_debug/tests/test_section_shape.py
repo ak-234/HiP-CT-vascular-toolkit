@@ -1,10 +1,30 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from hipct_seg_debug.edit.section_shape import section_shape, centring_summary, join_diagnostics
 from hipct_seg_debug.edit import centreline_refine as cr
 from .conftest_geometry import make_frame, slit, axis_graph, graph_from
+
+
+def test_dense_section_audit_visits_tightly_sampled_support_window(monkeypatch):
+    from hipct_seg_debug.edit.section_validation import SectionContext
+    frame = make_frame((30, 30, 100))
+    g = graph_from([(50., 150., 150.), (900., 150., 150.)], [(0, 1, 6, 20.)])
+    x = g.coords(0).copy()
+    x[:, 0] = [50., 300., 301., 302., 600., 900.]
+    g.set_segment_coords(0, x)
+    seen = []
+    def reject(sampler, centre, *args, **kwargs):
+        seen.append(frame.seg_to_um(centre)[0])
+        return None
+    monkeypatch.setattr(cr, 'stable_transverse_cut', reject)
+    diagnostics = {}
+    cr._targets(g, 0, frame, None, SectionContext(g), g.radii(0), 32, len(x),
+                diagnostics=diagnostics)
+    np.testing.assert_allclose(seen, x)
+    assert diagnostics['sampled_points'] == list(range(len(x)))
 
 
 def test_flat_ellipse_retains_shape_and_centres():
@@ -101,7 +121,8 @@ def test_centring_fit_is_stable_under_uneven_point_sampling():
     np.testing.assert_allclose(curves[0], curves[1], atol=5.)
 
 
-def test_parallel_sections_and_final_audit_match_serial(tmp_path):
+@pytest.mark.parametrize('dense_sids', [(), (0,)])
+def test_parallel_sections_and_final_audit_match_serial(tmp_path, dense_sids):
     import copy
     from hipct_seg_debug import amira, rle, rle_write
     shape = (12, 80, 80)
@@ -116,9 +137,13 @@ def test_parallel_sections_and_final_audit_match_serial(tmp_path):
     rle_write.write_lattice(path, mask, frame.seg_bbox_um)
     header = amira.read_lattice_header(path)
     labels = rle.open_lattice(path, header.fields['Labels'], header.dims, cache_dir=tmp_path/'cache')
-    serial = cr.refine(g, frame, labels, method='dfs-centroid-shape', max_iterations=1, max_samples=4)
+    serial = cr.refine(g, frame, labels, method='dfs-centroid-shape', max_iterations=1,
+                       max_samples=4, dense_sids=dense_sids)
     parallel = cr.refine(other, frame, labels, method='dfs-centroid-shape', max_iterations=1,
-                         max_samples=4, workers=2)
+                         max_samples=4, workers=2, dense_sids=dense_sids)
     for sid in g.segment_ids():
         np.testing.assert_allclose(g.coords(sid), other.coords(sid), atol=1e-8)
         assert serial.segments[sid]['centring_final'] == parallel.segments[sid]['centring_final']
+        for result in (serial, parallel):
+            sampled = result.segments[sid]['final_section_diagnostics']['sampled_points']
+            assert len(sampled) == (len(g.coords(sid)) if sid in dense_sids else 4)

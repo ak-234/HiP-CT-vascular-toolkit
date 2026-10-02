@@ -45,10 +45,12 @@ def test_regional_pipeline_writes_separate_measurements_profile_mesh_and_overlay
     digest = hashlib.sha256(original.read_bytes()).hexdigest()
     args = SimpleNamespace(graph=str(original), seg=str(seg), segment=[0],
         out_dir=str(tmp_path/'review'), fixed_node=[], workers=1, max_iterations=5,
-        max_samples=8, cells_across_diameter=6., maximum_cells=200_000, geometry_only=False)
+        max_samples=8, dense_target_sections=True,
+        cells_across_diameter=6., maximum_cells=200_000, geometry_only=False)
     report = evaluate(args, 0)
     directory = tmp_path/'review'/'region_0'
     assert report['status'] == 'qualified'
+    assert report['geometry']['segments'][0]['sampled_points'] == len(graph.coords(0))
     assert hashlib.sha256(original.read_bytes()).hexdigest() == digest
     assert (directory/'measured.am').exists()
     assert (directory/'reconstruction.am').exists()

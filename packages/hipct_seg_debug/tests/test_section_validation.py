@@ -67,18 +67,47 @@ def test_axial_continuation_has_finite_flat_end_support():
     assert verdict.accepted
 
 
-@pytest.mark.xfail(strict=True, reason='Known defect: a subvoxel endpoint kink extends a foreign tube backwards')
-def test_noisy_axial_continuation_must_not_contaminate_upstream_plane():
+@pytest.mark.parametrize('reverse,dense', [(False, False), (True, False), (False, True), (True, True)])
+def test_noisy_axial_continuation_must_not_contaminate_upstream_plane(reverse, dense):
     frame = make_frame((64, 100, 100))
     z, y, x = np.ogrid[:64, :100, :100]
     labels = np.broadcast_to((y-50)**2+(z-30)**2 <= 4**2, (64, 100, 100)).astype('uint8')
-    graph = branches([np.array([[10, 50, 30], [60, 50, 30]])*10.,
-                      np.array([[60, 50, 30], [60.1, 50.5, 30], [90, 50, 30]])*10.], [40., 200.])
+    lines = [np.array([[10, 50, 30], [60, 50, 30]])*10.,
+             np.array([[60, 50, 30], [60.1, 50.5, 30], [90, 50, 30]])*10.]
+    if dense:
+        line = lines[1]
+        lines[1] = np.vstack([a+(b-a)*np.linspace(0, 1, 21, endpoint=False)[:, None]
+                              for a, b in zip(line[:-1], line[1:])] + [line[-1:]])
+    if reverse:
+        lines = [line[::-1] for line in lines]
+    graph = branches(lines, [40., 200.])
     sampler = _PlaneSampler(labels, frame)
     c = cut(sampler, [50, 50, 30], [1, 0, 0], 25, max_half=45)
     verdict = SectionContext(graph).validate(0, c, np.array([500., 500., 300.]),
                                              [1, 0, 0], [1, 0, 0], sampler, frame)
     assert verdict.accepted
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_endpoint_cap_does_not_hide_curved_branch_return(reverse):
+    # The distant returning limb crosses the start-cap plane into the target.
+    # Applying that cap to the entire branch would incorrectly accept this cut.
+    frame = make_frame((64, 100, 100))
+    z, y, x = np.ogrid[:64, :100, :100]
+    labels = (((y-50)**2+(z-30)**2 <= 4**2) |
+              (((x-50)**2+(z-30)**2 <= 3**2) & (y >= 50) & (y <= 80))).astype('uint8')
+    lines = [np.array([[10, 50, 30], [60, 50, 30]])*10.,
+             np.array([[60, 50, 30], [90, 50, 30], [90, 80, 30],
+                       [50, 80, 30], [50, 50, 30]])*10.]
+    if reverse:
+        lines = [line[::-1] for line in lines]
+    graph = branches(lines, [40., 30.])
+    sampler = _PlaneSampler(labels, frame)
+    c = cut(sampler, [50, 50, 30], [1, 0, 0], 40, max_half=45)
+    verdict = SectionContext(graph).validate(0, c, np.array([500., 500., 300.]),
+                                             [1, 0, 0], [1, 0, 0], sampler, frame)
+    assert not verdict.accepted
+    assert verdict.reason == 'neighbouring_lumen_contamination'
 
 
 def test_every_alternative_plane_passes_validator():
