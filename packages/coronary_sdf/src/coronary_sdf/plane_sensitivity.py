@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import re
 import subprocess
 from collections import defaultdict
 from pathlib import Path
@@ -181,6 +182,9 @@ def validate_section(surface: Any, midpoint: np.ndarray, normal: np.ndarray, mar
             continue
         if float(np.min(np.linalg.norm(other - centre, axis=1))) <= bound_radius:
             raise ValueError("bounded plane intersects a second STL branch")
+    equivalent_radius = math.sqrt(area / math.pi)
+    if max_radius / equivalent_radius > 1.5 or np.linalg.norm(centre - midpoint) > equivalent_radius:
+        raise ValueError("elongated or off-centre section; review the local centreline tangent")
     return {"loop_points_mm": loop, "area_mm2": area, "section_equivalent_radius_mm": math.sqrt(area / math.pi), "centre_mm": centre, "max_radius_mm": max_radius, "bound_radius_mm": bound_radius, "loop_count": len(described)}
 
 
@@ -457,7 +461,7 @@ def extract_cfx_planes(post: str, res: Path, planes: list[dict[str, Any]], outpu
             complete = len(cached) == len(planes) and all(
                 row.get("plane_id") and all(row.get(key) not in (None, "") for key in ("area_m2", "velocity_mean_m_s", "velocity_max_m_s", "pressure_mean_pa"))
                 for row in cached
-            )
+            ) and _cached_plane_geometry_matches(output_csv, planes)
         except (OSError, ValueError):
             complete = False
     if not complete:
@@ -526,7 +530,12 @@ def extract_cfx_velocity_planes(
         try:
             with output_csv.open(newline="", encoding="utf-8") as handle:
                 cached = list(csv.DictReader(handle))
-            complete = len(cached) == len(planes) and all(all(row.get(key) not in (None, "") for key in required) for row in cached)
+            complete = (
+                {row["plane_id"] for row in cached} == {plane["plane_id"] for plane in planes}
+                and len(cached) == len(planes)
+                and all(all(row.get(key) not in (None, "") for key in required) for row in cached)
+                and _cached_plane_geometry_matches(output_csv, planes)
+            )
         except (OSError, ValueError):
             pass
     if not complete:
@@ -548,6 +557,21 @@ def extract_cfx_velocity_planes(
     if len(rows) != len(planes):
         raise RuntimeError("Expected {} all-vessel planes, found {} in {}".format(len(planes), len(rows), output_csv))
     return [{key: (value if key == "plane_id" else float(value)) for key, value in row.items()} for row in rows]
+
+
+def _cached_plane_geometry_matches(output_csv: Path, planes: list[dict[str, Any]]) -> bool:
+    """A populated CSV is stale when the extraction planes have changed."""
+    session = output_csv.with_suffix(".cse")
+    if not session.is_file():
+        return False
+    expected = _velocity_plane_session(Path("unused.res"), output_csv, planes)
+    def blocks(text):
+        return [
+            [line.strip() for line in block.splitlines()
+             if re.match(r"\s*(PLANE:|Bound Radius =|Normal =|Option =|Plane Bound =|Point =)", line)]
+            for block in re.findall(r"^PLANE: .*?^END$", text, re.MULTILINE | re.DOTALL)
+        ]
+    return blocks(session.read_text(encoding="utf-8")) == blocks(expected)
 
 
 def _domain_diagnostic_session(res: Path, domain: str, csv_path: Path) -> str:
