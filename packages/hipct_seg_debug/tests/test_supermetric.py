@@ -274,3 +274,70 @@ def test_the_aggregate_weights_the_big_tree_more_than_an_unweighted_mean():
 
 def test_the_aggregate_is_nan_when_no_tree_scored():
     assert np.isnan(sm.aggregate({}, []))
+
+
+# ------------------------------------------------------- the shared core / options
+
+
+def test_an_infinite_term_makes_the_total_infinite():
+    """A Dice or cl of zero is infinitely bad: it must not be dropped like a NaN."""
+    metric = sm.SuperMetric(volume=0.1, components=0.0, euler=0.0, cl=0.0,
+                            bifurcation=float("inf"))
+    assert metric.total == float("inf")
+    not_applicable = sm.SuperMetric(volume=0.1, components=0.0, euler=0.0, cl=0.0)
+    assert not_applicable.total == pytest.approx(0.1)
+
+
+def test_an_infinite_tree_makes_the_aggregate_infinite():
+    per_tree = {0: sm.SuperMetric(volume=1.0, bifurcation=float("inf")),
+                1: sm.SuperMetric(volume=1.0)}
+    assert sm.aggregate(per_tree, []) == float("inf")
+
+
+def test_coronary_is_the_default_and_paper_is_available(frame, tube, centreline):
+    image = sm.image_terms(tube, frame.seg_spacing, tree_chi=True)
+    refs = sm.reference_bifurcations(tube, frame)
+    default = sm.super_metric(centreline, frame, tube, image, refs)
+    assert default.options == sm.CORONARY
+    assert not default.paper_comparable
+
+    paper_image = sm.image_terms(tube, frame.seg_spacing, tree_chi=False)
+    paper = sm.super_metric(centreline, frame, tube, paper_image, refs, options=sm.PAPER)
+    assert paper.options == sm.PAPER and paper.paper_comparable
+
+
+def test_options_for_the_command_line():
+    assert sm.options_for("coronary") == sm.CORONARY
+    assert sm.options_for("paper") == sm.PAPER
+    fixed = sm.options_for("coronary", bb_threshold=900.0)
+    assert (fixed.tolerance, fixed.tolerance_value) == ("fixed", 900.0)
+    assert sm.options_for("coronary", tree_chi=False).chi_reference == "image"
+
+
+def test_reference_bifurcations_carry_the_local_radius(frame):
+    from .conftest_geometry import graph_from  # noqa: F401  (geometry helpers import)
+
+    shape = SHAPE
+    z, y, x = np.indices(shape).astype(float)
+
+    def rod(p0, p1, r=4):
+        p0, p1 = np.array(p0, float), np.array(p1, float)
+        vox = np.stack([x, y, z], -1)
+        d = p1 - p0
+        t = np.clip(((vox - p0) @ d) / (d @ d), 0, 1)
+        return np.linalg.norm(vox - (p0 + t[..., None] * d), axis=-1) <= r
+
+    y_shape = rod([5, 20, 20], [40, 20, 20]) | rod([40, 20, 20], [75, 5, 20]) \
+        | rod([40, 20, 20], [75, 35, 20])
+    refs = sm.reference_bifurcations(y_shape, frame)
+    assert len(refs) >= 1
+    assert refs.radius_um is not None and len(refs.radius_um) == len(refs)
+    assert np.all(refs.radius_um >= frame.seg_spacing.min())
+    assert np.all(refs.radius_um < 8 * SPACING), "about the 4-voxel rod radius"
+
+
+def test_an_isolated_node_is_a_component(centreline):
+    """Per the paper (and the shared core): a node with no segment is a subnetwork."""
+    before = sm.graph_components(centreline)
+    centreline.add_node((0.0, 0.0, 0.0))
+    assert sm.graph_components(centreline) == before + 1

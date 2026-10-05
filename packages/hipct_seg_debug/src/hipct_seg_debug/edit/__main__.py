@@ -464,8 +464,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="write skeletons without the dense image topology/super-metric pass; "
              "useful for full-resolution volumes too large to score in memory",
     )
-    skel_all.add_argument("--bb-threshold", type=float, default=900.0,
-                          help="bifurcation match distance in um")
+    skel_all.add_argument("--bb-threshold", type=float, default=None,
+                          help="fixed bifurcation match distance in um; default: 1.5 x the local vessel radius (the paper)")
+    skel_all.add_argument("--metric-preset", choices=["coronary", "paper"], default="coronary",
+                          help="super metric options (default: coronary; paper gives numbers comparable with Walsh et al. 2024)")
     # `--per-tree` here means both halves at once: derive the skeleton per component
     # and score each tree on its own terms, which is the only combination that makes
     # the ranking mean anything -- a per-tree skeleton ranked by a whole-graph M_S
@@ -525,7 +527,10 @@ def build_parser() -> argparse.ArgumentParser:
     opt_skel.add_argument("--lhs", type=int, default=0,
                           help="Latin-hypercube samples between each --sweep range "
                                "(the paper's design); 0 uses the listed values as a grid")
-    opt_skel.add_argument("--bb-threshold", type=float, default=900.0)
+    opt_skel.add_argument("--bb-threshold", type=float, default=None,
+                          help="fixed bifurcation match distance in um; default: 1.5 x the local vessel radius (the paper)")
+    opt_skel.add_argument("--metric-preset", choices=["coronary", "paper"], default="coronary",
+                          help="super metric options (default: coronary; paper gives numbers comparable with Walsh et al. 2024)")
     opt_skel.add_argument("--no-tree-chi", action="store_true")
     _add_roots_json(opt_skel)
     _add_pick_roots_args(opt_skel, roots_json=False)
@@ -810,7 +815,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     score = sub.add_parser("score", parents=[graph_arg, seg_common],
                            help="the five super-metric terms and M_S for one graph")
-    score.add_argument("--bb-threshold", type=float, default=900.0)
+    score.add_argument("--bb-threshold", type=float, default=None,
+                       help="fixed bifurcation match distance in um; default: 1.5 x the local vessel radius (the paper)")
+    score.add_argument("--metric-preset", choices=["coronary", "paper"], default="coronary",
+                       help="super metric options (default: coronary; paper gives numbers comparable with Walsh et al. 2024)")
     score.add_argument("--no-tree-chi", action="store_true")
     _add_per_tree_score_args(score)
 
@@ -2183,13 +2191,22 @@ def _decoded(args):
     return volume, frame, labels, path
 
 
+def _metric_options(args):
+    """The super metric options the command line asked for."""
+    from . import supermetric as sm
+
+    return sm.options_for(getattr(args, "metric_preset", "coronary"),
+                          tree_chi=None if not getattr(args, "no_tree_chi", False) else False,
+                          bb_threshold=getattr(args, "bb_threshold", None))
+
+
 def _scoring_context(args, volume, frame):
     """``(ImageTerms, reference bifurcations)`` -- the half that does not vary."""
     from . import supermetric as sm
 
     print("\nscoring context (computed once, reused for every candidate)...")
     image = sm.image_terms(volume, frame.seg_spacing,
-                           tree_chi=not args.no_tree_chi)
+                           tree_chi=_metric_options(args).chi_reference == "tree")
     print(" ", image.describe())
     refs = sm.reference_bifurcations(volume, frame)
     print(f"  {len(refs)} reference bifurcation(s) from the mask's own skeleton")
@@ -2259,8 +2276,7 @@ def cmd_skeletonise_all(args) -> int:
         if not args.no_score:
             graph = EditableGraph(cand.triple)
             metric = sm.super_metric(
-                graph, frame, volume, image, refs,
-                bb_threshold=args.bb_threshold,
+                graph, frame, volume, image, refs, options=_metric_options(args),
             )
             print(metric.describe())
             rank = metric.total
@@ -2488,7 +2504,7 @@ def cmd_optimise_skeleton(args) -> int:
             trial = EditableGraph(source.triple.copy())
             report = so.optimise_skeleton(trial, frame, volume, **kw)
             metric = sm.super_metric(trial, frame, volume, image, refs,
-                                     bb_threshold=args.bb_threshold)
+                                     options=_metric_options(args))
             label = " ".join(
                 f"{k}={v:g}" if isinstance(v, float) else f"{k}={v}"
                 for k, v in sorted(sample.items())
@@ -2500,7 +2516,8 @@ def cmd_optimise_skeleton(args) -> int:
                 # source carried one, and pruning changes which segments exist.
                 scores = sm.super_metric_per_tree(
                     _tagged(trial, stats, parts, frame), frame, stats.labels, parts,
-                    bb_threshold=args.bb_threshold, tree_chi=not args.no_tree_chi,
+                    tree_chi=_metric_options(args).chi_reference == "tree",
+                    options=_metric_options(args),
                 )
                 if scores:
                     rank = (next(iter(scores.values())).total if scope == "largest"
@@ -2541,7 +2558,7 @@ def cmd_optimise_skeleton(args) -> int:
     if scope != "whole":
         image, refs = _scoring_context(args, volume, frame)
         metric = sm.super_metric(source, frame, volume, image, refs,
-                                 bb_threshold=args.bb_threshold)
+                                 options=_metric_options(args))
         print()
         print(metric.describe())
         _print_scoped_scores(args, source, frame, volume, scope)
@@ -3026,7 +3043,7 @@ def cmd_score(args) -> int:
     volume, frame, _labels, _path = _decoded(args)
     image, refs = _scoring_context(args, volume, frame)
     metric = sm.super_metric(graph, frame, volume, image, refs,
-                             bb_threshold=args.bb_threshold)
+                             options=_metric_options(args))
     print()
     print(metric.describe())
 
@@ -3100,7 +3117,8 @@ def _scoped_scores(args, graph, frame, volume, scope: str, *, verbose: bool = Tr
 
     scores = sm.super_metric_per_tree(
         graph, frame, stats.labels, parts,
-        bb_threshold=args.bb_threshold, tree_chi=not args.no_tree_chi, verbose=verbose,
+        tree_chi=_metric_options(args).chi_reference == "tree", verbose=verbose,
+        options=_metric_options(args),
     )
     if not scores:
         if verbose:

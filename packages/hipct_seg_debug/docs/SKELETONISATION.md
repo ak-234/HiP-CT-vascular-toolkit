@@ -142,7 +142,38 @@ Note VesselVio's **pruning length** is the paper's version of the spur removal t
 
 ## 4. What this repo implements, and where it departs
 
-Implemented in `edit/supermetric.py`, faithfully to Eq. 10 except where noted.
+The metric itself is implemented once, in
+`skeleton_analysis.optimisation.supermetric` (the paper's Eq. 10, with option presets).
+`edit/supermetric.py` adapts this package's graphs and frames to it and adds the per-tree
+scoring. The departures below are the `CORONARY` preset, which is this package's default;
+pass `options=PAPER` in Python, or `--metric-preset paper` on the command line
+(`skeletonise-all`, `optimise-skeleton`, `score`), for numbers comparable with the paper.
+Every result reports `paper_comparable`.
+
+| option | `PAPER` (paper) | `CORONARY` (default here) |
+|---|---|---|
+| bifurcation reference | manual (GT skeleton or points) | automatic (mask skeleton junctions) |
+| sub-volume for `B` | yes | no (whole graph) |
+| `χ` reference | the image's own | a tree (`χ_classical = 1`) |
+| interpolated (Avizo) points | counted | left out of `V` and `cl` |
+| matching | optimal one-to-one (Hungarian) | optimal one-to-one (Hungarian) |
+| match tolerance | 1.5 × local radius (distance map) | 1.5 × local radius (distance map) |
+
+`matching="greedy"` (the original MATLAB's order-dependent nearest neighbour) is still available
+for comparison with earlier results. **TODO: remove it once agreed (Claire / Akash).**
+`--bb-threshold` replaces the radius-based tolerance with a fixed distance in µm.
+
+Fixed by the paper and not options: the weights; the largest component chosen **by volume** on
+both the image and graph sides; an isolated node counting as a component; and a `cl` or `B` of
+zero making `M_S` infinite (a NaN term — e.g. no bifurcation on either side — is dropped instead).
+
+**Changed when the shared core was introduced** (results before and after are not identical):
+a zero-Dice or zero-`cl` skeleton now scores `inf` instead of having that term silently dropped
+from the total (and from `aggregate`); bifurcations are matched optimally within 1.5 × the local
+radius rather than greedily within a fixed 900 µm; the graph's largest component is chosen by
+volume rather than segment count; isolated nodes count towards `cc`; and false positives are
+split into *duplicate* (clustered around a matched bifurcation) and *isolated*. The LADAF-2024-28
+figures below were measured before this change.
 
 **Departure 1 — `χ` is scored against a tree, not against the segmentation.**
 This pipeline images *coronary arteries* ex vivo. At this calibre the true anatomy is a tree: there
@@ -408,7 +439,11 @@ resolution it was run at.**
 
 ### Where the existing port differs from the paper
 
-`skeleton_analysis.optimisation` does **not** implement Eq. 10. Its `meta_metric` docstring is
+> `skeleton_analysis.optimisation.meta_metric.meta_metric` and
+> `skeleton_analysis.optimisation.volume_metrics.super_metric` are **deprecated** and warn when
+> called. Use `skeleton_analysis.optimisation.supermetric` for the paper's metric.
+
+The legacy port (`meta_metric`, `volume_metrics.super_metric`) does **not** implement Eq. 10. Its `meta_metric` docstring is
 candid that it "realises the formula left commented in `meta_metric.m`" — it was reconstructed from
 a commented-out MATLAB expression rather than from the paper.
 

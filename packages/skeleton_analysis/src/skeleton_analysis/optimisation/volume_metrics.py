@@ -8,14 +8,16 @@ whole-volume morphometrics.
 * :func:`region_props_table` / :func:`region_morphometrics` — per-region and
   whole-volume connected-components / Euler number / volume / surface area (the
   Python replacement for the Fiji/MorphoLibJ ``super_metric_Euler_and_cc.ijm``).
-* :func:`super_metric` — the combined skeleton-optimisation "meta metric"
-  (Volume + CC + Euler + branch-point Dice + clDice), completing ``meta_metric.m``.
+* :func:`super_metric` — the legacy combined "meta metric" (Volume + CC + Euler +
+  branch-point count + clDice), completing ``meta_metric.m``. **Deprecated**: use
+  :mod:`skeleton_analysis.optimisation.supermetric` for the paper's metric.
 
 The morphometric / super-metric functions need the ``[image]`` extra (scikit-image).
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import Dict, Optional
 
 import numpy as np
@@ -198,7 +200,16 @@ def super_metric(
     of the relative differences; 0 == identical). Branch counts come from the two
     graphs (matched via ``bifurcation_dice``) when both are supplied; CL is the
     clDice of candidate vs reference (reference self-CL = 1.0). Requires ``[image]``.
+
+    .. deprecated::
+        Computes V, cc and Euler from two *volumes*, so comparing two skeletons of
+        one mask leaves those terms at zero; it is not the paper's metric. Use
+        :func:`skeleton_analysis.optimisation.supermetric.super_metric`.
     """
+    warnings.warn(
+        "volume_metrics.super_metric is the legacy port and is deprecated; use "
+        "skeleton_analysis.optimisation.supermetric.super_metric (Walsh et al. 2024, Eq. 10).",
+        DeprecationWarning, stacklevel=2)
     from skeleton_analysis.optimisation.cl_dice import cl_dice
     from skeleton_analysis.optimisation.meta_metric import (
         bifurcation_dice,
@@ -229,5 +240,7 @@ def super_metric(
 
     result.update({f"candidate_{k}": v for k, v in cand.items()})
     result.update({f"reference_{k}": v for k, v in ref.items()})
-    result["meta_metric"] = meta_metric(cand, ref)
+    with warnings.catch_warnings():  # already warned above
+        warnings.simplefilter("ignore", DeprecationWarning)
+        result["meta_metric"] = meta_metric(cand, ref)
     return result
