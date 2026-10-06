@@ -115,7 +115,8 @@ class Classified:
 
 def associate(index, frame, graph, nodes=None, *,
               reach_radii: float = ASSOCIATION_REACH_RADII,
-              reach_voxels: float = ASSOCIATION_REACH_VOXELS) -> dict[int, Association]:
+              reach_voxels: float = ASSOCIATION_REACH_VOXELS,
+              tangents: dict | None = None) -> dict[int, Association]:
     """Map every free end onto the mask component that contains -- or nearly
     contains -- it.
 
@@ -125,15 +126,18 @@ def associate(index, frame, graph, nodes=None, *,
     voxels out means the graph and the mask disagree about where this vessel is,
     and that is a finding rather than a rounding error -- so it is reported as
     unassociated rather than snapped to whatever happens to be nearest.
+
+    `tangents` optionally supplies ``{node: (direction, radius_um)}`` measured by
+    the caller, as in :func:`~..endpoints.propose`.
     """
-    from ..candidates import endpoint_tangent
+    from ..candidates import tangent_for
 
     ends = list(nodes) if nodes is not None else graph.endpoints()
     spacing = np.asarray(frame.seg_spacing, dtype=np.float64)
     out: dict[int, Association] = {}
 
     for node in ends:
-        tangent = endpoint_tangent(graph, node)
+        tangent = tangent_for(graph, node, tangents)
         if tangent is None:
             continue
         direction, radius = tangent

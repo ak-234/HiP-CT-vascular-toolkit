@@ -275,6 +275,54 @@ def test_the_tiff_folder_opens_in_anything_that_reads_a_tiff(built, tmp_path):
     readme = (path / "README.txt").read_text(encoding="utf-8")
     assert "plane index" in readme and "centre pixel" in readme
     assert "um per plane" in readme and "um per pixel" in readme
+    # A native stack was neither pre-filtered nor sharpened, and the README does not
+    # claim otherwise.
+    assert "Pre-filter" not in readme and "Sharpened" not in readme
+
+
+def test_a_filtered_and_sharpened_stack_says_so_in_the_readme_and_round_trips(tmp_path):
+    """Neither is visible in ``raw.tif``, and the second is the one a calibre must
+    not be read off."""
+    direction = AXIS / np.linalg.norm(AXIS)
+    labels = tilted_cylinder(SHAPE, AXIS, 7.0)
+    volume = (labels * 500 + 100).astype(np.uint16)
+    ends = np.array([35.0, 35.0, 35.0]) + np.array([-18.0, 18.0])[:, None] * direction
+    graph = graph_from([tuple(ends[0]), tuple(ends[1])], [(0, 1, 40, 7.0)])
+    frame = unit_frame(SHAPE)
+    # 3 radii of 7 on 11 px is 2.1 voxels per pixel: under-sampled, so pre-filtered.
+    stack = rf.build(
+        graph, frame, FakeStack(volume), [0], mode="fixed", radii_k=3.0, size_px=11,
+        step_um=1.0, sharpen=1.0,
+    )
+    assert stack.stats.n_anti_aliased == stack.n_planes
+    assert stack.stats.sigma_max_vox > 0
+
+    path = rio.save(stack, tmp_path / "run", fmt="tiff", frame=frame, graph=graph)
+    readme = (path / "README.txt").read_text(encoding="utf-8")
+    assert "Pre-filter" in readme and "low-passed" in readme
+    assert "Sharpened" in readme and "unsharp mask" in readme
+
+    back = rio.load(path).reformat
+    assert back.stats.n_anti_aliased == stack.stats.n_anti_aliased
+    assert back.stats.sigma_min_vox == stack.stats.sigma_min_vox
+    assert back.stats.sigma_max_vox == stack.stats.sigma_max_vox
+    assert any("sharpened" in n for n in back.notes)
+
+
+def test_a_stack_saved_before_the_anti_alias_fields_existed_still_loads(built, tmp_path):
+    import json
+
+    stack, frame, graph = built
+    path = rio.save(stack, tmp_path / "run", fmt="npy", frame=frame, graph=graph)
+    doc_path = path / "geometry.json"
+    doc = json.loads(doc_path.read_text(encoding="utf-8"))
+    for key in ("n_anti_aliased", "sigma_min_vox", "sigma_max_vox"):
+        del doc["stats"][key]
+    doc_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    back = rio.load(path).reformat
+    assert back.stats.n_anti_aliased == 0
+    assert back.stats.sigma_max_vox == 0.0
 
 
 def test_the_npz_is_one_file_and_the_folders_are_folders(built, tmp_path):

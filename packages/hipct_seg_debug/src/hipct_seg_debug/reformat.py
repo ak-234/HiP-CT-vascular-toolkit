@@ -23,7 +23,12 @@ frame size, so one output pixel is one voxel whatever the vessel is doing. The o
 three modes derive the pitch from a half-width instead, which is what lets a small
 radius -- or the curvature clamp below -- turn into magnification. Whichever is in
 use, :attr:`PlaneGeometry.oversampling` states the factor rather than leaving a soft
-picture unexplained.
+picture unexplained. Nor must the grid ask for *less* than the data has: a pitch
+coarser than the voxel under-samples, and fine texture then aliases into a beat
+pattern that is not in the tissue. So wherever the pitch exceeds the voxel the raw
+block is low-passed with a Gaussian sized to the ratio (:func:`anti_alias_sigma`)
+before it is interpolated -- exactly zero at one voxel per pixel, so a ``native``
+stack is untouched.
 
 **The frame must not twist.** The two in-plane axes have to be transported along the
 centreline with no rotation about the tangent, or the image spins as you scroll and
@@ -112,14 +117,126 @@ DEFAULT_ORDER = 3
 #: gives 4.5e-7, and pad 16 is exact. ``test_chunking_does_not_change_the_answer``
 #: asserts exact equality across memory budgets and is the guard for this.
 #:
+#: This is the *spline* pad only. When a block is anti-aliased first, the Gaussian's
+#: own radius (:func:`gaussian_radius`) is added on top -- see
+#: :meth:`ObliqueSampler.block_pad`.
+#:
 #: One genuine exception, documented rather than papered over: a block clipped at the
-#: true volume boundary cannot carry its pad, so its prefilter differs there. That is at
-#: the edge of the data, where there is nothing to recover anyway.
+#: true volume boundary cannot carry its pad, so its prefilter (and its anti-alias
+#: filter) differs there. That is at the edge of the data, where there is nothing to
+#: recover anyway.
 SPLINE_PAD = {0: 1, 1: 1, 2: 12, 3: 16, 4: 24, 5: 32}
+
+#: The ``truncate`` handed to ``gaussian_filter``: the kernel is cut at this many sigma,
+#: and :func:`gaussian_radius` must derive from the same number or the block pad and
+#: the filter disagree about how far the filter reaches.
+GAUSSIAN_TRUNCATE = 4.0
+
+#: The anti-alias sigma is rounded **up** to a multiple of this, in voxels, and the
+#: block planner splits a run wherever the rung changes. That makes each plane's sigma
+#: a function of the plane alone rather than of which block it happened to land in, so
+#: a one-block build and a forty-block build apply the same filter to the same plane --
+#: which is what keeps ``test_chunking_does_not_change_the_answer`` true with the
+#: filter on. Rounding up means no plane is under-filtered; over-filtering is bounded
+#: by one rung.
+ANTI_ALIAS_SIGMA_STEP = 0.25
+
+#: How far the three raw voxel dimensions may disagree before the reformat refuses.
+#: The sampler's grid and its anti-alias filter are both isotropic in voxels, so an
+#: anisotropic voxel would magnify along one axis and under-filter along another
+#: without either being reported. Production passes one scalar broadcast to three, so
+#: this only bites the seg-derived path, where the axes differ in the sixth digit.
+VOXEL_ISOTROPY_RTOL = 1e-3
+
+#: Post-sampling unsharp mask: amount (0 is off) and the blur sigma in output pixels.
+#: Off by default because it changes the values -- see :func:`unsharp_mask`.
+DEFAULT_SHARPEN = 0.0
+DEFAULT_SHARPEN_SIGMA_PX = 1.0
 
 
 class ReformatError(RuntimeError):
     """The requested reformat cannot be built as asked."""
+
+
+# --------------------------------------------------------------------------- #
+# What the raw grid is, and what a plane's pitch asks of it
+# --------------------------------------------------------------------------- #
+
+
+def isotropic_voxel_um(frame) -> float:
+    """The one raw voxel size, after checking there *is* one.
+
+    ``WorldFrame.raw_voxel`` is a ``(3,)`` vector. Everything in this module -- the
+    default step, the ``native`` pitch, the oversampling report and the anti-alias
+    sigma -- treats it as a scalar, which is only honest when the three agree. Refused
+    with the three values named rather than silently taking the smallest, which is what
+    ``np.min`` used to do here and which would magnify along the coarse axis.
+    """
+    v = np.asarray(frame.raw_voxel, dtype=np.float64).reshape(-1)
+    if len(v) != 3 or not np.all(np.isfinite(v)) or v.min() <= 0:
+        raise ReformatError(f"the raw voxel size is not usable: {v}")
+    if np.ptp(v) > VOXEL_ISOTROPY_RTOL * float(v.mean()):
+        raise ReformatError(
+            f"the raw voxel is anisotropic ({v[0]:.4f} x {v[1]:.4f} x {v[2]:.4f} um); "
+            f"the reformat samples an isotropic grid and its anti-alias filter is "
+            f"isotropic in voxels, so it needs the three to agree to within "
+            f"{100 * VOXEL_ISOTROPY_RTOL:g}%"
+        )
+    return float(v.mean())
+
+
+def anti_alias_sigma(factor) -> np.ndarray:
+    """Gaussian sigma, in raw voxels, that band-limits the block for a pitch of
+    ``factor`` voxels per output pixel. Zero wherever ``factor <= 1``.
+
+    Model the raw voxel as a Gaussian aperture of sigma 1/2 voxel. An output pixel of
+    pitch ``f`` needs an aperture of sigma ``f/2`` -- a full width slightly wider than
+    its own pitch, i.e. band-limited to its own Nyquist -- and the blur that has to be
+    added to get there is the difference in quadrature, ``sqrt(f^2 - 1) / 2``. That is
+    exactly 0 at ``f = 1``, so ``native`` mode and every magnifying geometry come
+    through this untouched, bit for bit.
+
+    skimage's ``(f - 1) / 2`` is too light for a *discrete* kernel: at ``f = 2`` its
+    sigma of 0.5 still passes 57% of a Nyquist stripe (the sampled kernel is 0.79,
+    0.11, 0.11), where the 1.0 used here passes 1.4%; at ``f = 3`` sigma 1.5 passes
+    7e-5.
+
+    Rounded up to the :data:`ANTI_ALIAS_SIGMA_STEP` ladder, for the reason given there.
+    """
+    f = np.maximum(np.asarray(factor, dtype=np.float64), 1.0)
+    raw = np.sqrt(np.maximum(f * f - 1.0, 0.0)) / 2.0
+    rung = np.ceil(raw / ANTI_ALIAS_SIGMA_STEP) * ANTI_ALIAS_SIGMA_STEP
+    # A pitch of one voxel arrives as 1 + 1e-12 from the division; that must be 0, not
+    # a quarter-voxel pass quietly applied to every native build.
+    return np.where(f <= 1.0 + 1e-6, 0.0, rung)
+
+
+def gaussian_radius(sigma_vox) -> int:
+    """How many voxels a ``gaussian_filter`` of this sigma reaches: scipy's own ``lw``."""
+    s = float(sigma_vox)
+    return int(GAUSSIAN_TRUNCATE * s + 0.5) if s > 0 else 0
+
+
+def unsharp_mask(stack, amount, sigma_px) -> np.ndarray:
+    """``stack + amount * (stack - blur(stack))``, per plane. The input when ``amount <= 0``.
+
+    Cosmetic, and said so wherever it is applied: it steepens every edge, including the
+    ones the interpolation kernel softened at a magnifying pitch, but it cannot put back
+    detail the acquisition does not have, and it overshoots on both sides of a real
+    edge. A calibre read off a sharpened stack is a calibre read off the overshoot.
+    Kept out of the sampler so the samples themselves stay the acquisition's.
+
+    Sigma 0 on the plane axis makes the blur two-dimensional in one call; ``nearest``
+    at the frame edge so the border is not pulled towards zero.
+    """
+    if amount is None or float(amount) <= 0.0:
+        return stack
+    from scipy import ndimage
+
+    s = max(float(sigma_px), 1e-3)
+    a = np.asarray(stack, dtype=np.float32)
+    blurred = ndimage.gaussian_filter(a, sigma=(0.0, s, s), mode="nearest")
+    return a + np.float32(amount) * (a - blurred)
 
 
 # --------------------------------------------------------------------------- #
@@ -743,6 +860,18 @@ class PlaneGeometry:
             return np.ones_like(self.px_um)
         return self.voxel_um / np.maximum(self.px_um, 1e-9)
 
+    @property
+    def anti_alias_sigma_vox(self) -> np.ndarray:
+        """(N,) the Gaussian sigma, in raw voxels, each plane's block is low-passed
+        with before interpolation; 0 wherever the pitch is at or below the voxel.
+
+        One function, :func:`anti_alias_sigma`, is the truth for both this report and
+        :class:`ObliqueSampler`, so the two cannot disagree.
+        """
+        if self.voxel_um <= 0:
+            return np.zeros_like(self.px_um)
+        return anti_alias_sigma(self.px_um / float(self.voxel_um))
+
     def describe(self) -> str:
         out = (
             f"planes: {self.size_px}x{self.size_px} px, half-width "
@@ -759,6 +888,15 @@ class PlaneGeometry:
                 out += (
                     " -- above 1.5x the section is magnified rather than resolved; "
                     "'match voxel' sizes the grid to the data"
+                )
+            sigma = self.anti_alias_sigma_vox
+            under = int((sigma > 0).sum())
+            if under:
+                out += (
+                    f"\n  under-sampling at {under} of {len(sigma)} planes (down to "
+                    f"{over.min():.2f}x): the block is low-passed with a "
+                    f"{sigma[sigma > 0].min():.2f}-{sigma.max():.2f} voxel Gaussian "
+                    f"before interpolation, unless anti-alias is off"
                 )
         if self.clamped:
             out += (
@@ -938,6 +1076,12 @@ class SampleStats:
     #: decodes is an order of magnitude slower and otherwise looks identical.
     strip_reads: int = 0
     whole_page_reads: int = 0
+    #: How many planes had their block low-passed before interpolation, and the sigma
+    #: range that was used. The geometry *predicts* this; here is what actually ran,
+    #: which differs when the sampler was built with ``anti_alias=False``.
+    n_anti_aliased: int = 0
+    sigma_min_vox: float = 0.0
+    sigma_max_vox: float = 0.0
 
     @property
     def distinct_slices(self) -> int:
@@ -961,6 +1105,11 @@ class SampleStats:
                 f"\n  {self.whole_page_reads:,} of {self.strip_reads + self.whole_page_reads:,} "
                 f"windows needed a whole-page decode (~19x the cost of a strip read)"
             )
+        if self.n_anti_aliased:
+            out += (
+                f"\n  anti-alias: {self.n_anti_aliased:,} plane(s) pre-filtered, sigma "
+                f"{self.sigma_min_vox:.2f}-{self.sigma_max_vox:.2f} voxel"
+            )
         if self.seconds:
             out += ("\n  order " + str(self.order) + "; "
                     + ", ".join(f"{k} {v:.1f}s" for k, v in self.seconds.items()))
@@ -968,7 +1117,7 @@ class SampleStats:
 
 
 class ObliqueSampler:
-    """Trilinear samples of the raw stack at arbitrary world positions.
+    """Interpolating B-spline samples of the raw stack at arbitrary world positions.
 
     There is no such sampler anywhere else in this package -- everything oblique is
     mask-side and nearest-neighbour -- and the reason is that the raw stack is ~92 GB
@@ -980,13 +1129,35 @@ class ObliqueSampler:
     memory budget, read once with ``TiffStack.read_stack_window``, and every sample in
     the run taken from it with a single ``map_coordinates`` call.
 
-    Two details in that are load-bearing rather than incidental:
+    **The spline is the interpolating kind, not the smoothing kind.** A common way to
+    get a B-spline wrong is to convolve the raw values with the basis function directly,
+    which is a low-pass filter with a 1/6-4/6-1/6 footprint and gives a visibly soft
+    image. ``map_coordinates`` avoids that by ``prefilter=True``: the raw values are
+    first converted to spline *coefficients* by a recursive causal/anti-causal all-pole
+    filter (the inverse of the basis convolution), so evaluating the spline at a grid
+    point returns the grid value exactly. That flag is scipy's default; it is passed
+    explicitly here so that nobody can drop it without noticing, and
+    ``test_integer_grid_samples_reproduce_the_raw_values`` is the proof it is on.
 
-    * **the block is padded by one voxel on every side.** ``map_coordinates`` with
+    Three details in that are load-bearing rather than incidental:
+
+    * **the block is padded, and by more than one voxel.** ``map_coordinates`` with
       ``mode="constant"`` returns ``cval`` for any coordinate outside the block, so a
       sample sitting a fraction of a voxel inside the last row would come back 0
-      instead of interpolated -- a black stripe down every block seam. The pad costs
-      one extra decode per seam.
+      instead of interpolated -- a black stripe down every block seam. And the
+      coefficient prefilter is an IIR filter, so its output well inside the block still
+      depends on what lies outside it: :data:`SPLINE_PAD` is how far in that matters.
+      When the block is anti-aliased first, the Gaussian's reach is added on top
+      (:meth:`block_pad`): the Gaussian is FIR, so it is wrong only within its own
+      radius of the block edge, and the spline pad sits inside that.
+    * **the block is low-passed wherever the planes under-sample it.** A pitch coarser
+      than the voxel aliases fine texture into a beat pattern that is not in the
+      tissue. The fix is a Gaussian of :func:`anti_alias_sigma` applied to the raw
+      block *before* interpolation -- never to the output, where it would blur the
+      alias rather than remove it. Isotropic in voxels, which is why the voxel has to
+      be (:func:`isotropic_voxel_um`); it therefore also low-passes along the vessel,
+      which at a one-voxel plane step leaves the stack with the same resolution in all
+      three directions rather than a finer one along the axis you scroll.
     * **the block is cast to float32 first.** ``map_coordinates`` keeps its input's
       dtype, so an ``order=1`` blend of ``uint16`` truncates back to integers and the
       image picks up a visible quantisation crawl along the vessel.
@@ -995,9 +1166,14 @@ class ObliqueSampler:
     (``frame.py:107``), the axis-aligned raw box of a sampled plane is exactly the box
     of its four corners -- so the planner works off ``(N, 4, 3)`` rather than off every
     sample, and is exact rather than conservative.
+
+    Transient memory is a few times the block: ``map_coordinates`` holds a float64
+    coefficient copy for ``order >= 2``, and the anti-alias pass one more float32. The
+    budget counts the block itself, as it always has.
     """
 
-    def __init__(self, stack, frame, *, budget_mb=512.0, order=DEFAULT_ORDER):
+    def __init__(self, stack, frame, *, budget_mb=512.0, order=DEFAULT_ORDER,
+                 anti_alias=True):
         self.stack = stack
         self.frame = frame
         self.budget = float(budget_mb) * 1e6
@@ -1007,13 +1183,26 @@ class ObliqueSampler:
                 f"interpolation order {self.order} is not supported; "
                 f"expected one of {sorted(SPLINE_PAD)}"
             )
+        #: The spline pad alone; :meth:`block_pad` adds the anti-alias reach.
         self.pad = SPLINE_PAD[self.order]
+        self.anti_alias = bool(anti_alias)
 
-    def sample(self, points_um, *, stats=None) -> np.ndarray:
+    def block_pad(self, sigma_vox=0.0) -> int:
+        """Voxels of padding a block needs when it is low-passed with ``sigma_vox``."""
+        return self.pad + gaussian_radius(sigma_vox)
+
+    def plane_sigmas(self, geom) -> np.ndarray:
+        """(N,) anti-alias sigma per plane, as this sampler will actually apply it."""
+        sigma = np.asarray(geom.anti_alias_sigma_vox, dtype=np.float64)
+        return sigma if self.anti_alias else np.zeros_like(sigma)
+
+    def sample(self, points_um, *, sigma_vox=0.0, stats=None) -> np.ndarray:
         """``(...)`` float32 samples for ``(..., 3)`` world positions, 0 outside.
 
-        The primitive: reads **one** block covering everything it was given. Chunking
-        is :meth:`sample_planes`' job, which feeds this a run at a time.
+        The primitive: reads **one** block covering everything it was given, low-passes
+        it with ``sigma_vox`` (raw voxels; 0 skips it) and interpolates. Chunking is
+        :meth:`sample_planes`' job, which feeds this a run at a time with the run's
+        one sigma.
         """
         from scipy import ndimage
 
@@ -1028,8 +1217,9 @@ class ObliqueSampler:
         flat = raw.reshape(-1, 3)
         n_out = int((~self._inside(flat, nz, n_rows, n_cols)).sum())
 
+        sigma = float(sigma_vox)
         lo, hi = self._box(flat)
-        pad = self.pad
+        pad = self.block_pad(sigma)
         z0 = max(int(np.floor(lo[0])) - pad, 0)
         z1 = min(int(np.ceil(hi[0])) + pad + 1, nz)
         r0 = int(np.floor(lo[1])) - pad
@@ -1050,16 +1240,28 @@ class ObliqueSampler:
         t0 = time.perf_counter()
         block = self.stack.read_stack_window(z0, z1, r0, r1, c0, c1).astype(np.float32)
         t1 = time.perf_counter()
+        if sigma > 0.0:
+            # On the padded block, in float32 (scipy accumulates each line in double
+            # and only rounds the output). Boundary handling is scipy's default and
+            # only matters inside the pad, which is what the pad is for.
+            block = ndimage.gaussian_filter(block, sigma, truncate=GAUSSIAN_TRUNCATE)
+        t2 = time.perf_counter()
         local = flat - np.array([z0, r0, c0], dtype=np.float64)
+        # `prefilter=True` is scipy's default and the whole point: without it the cubic
+        # is a smoothing filter, not an interpolant. See the class docstring.
         out.reshape(-1)[:] = ndimage.map_coordinates(
-            block, local.T, order=self.order, mode="constant", cval=0.0
+            block, local.T, order=self.order, mode="constant", cval=0.0, prefilter=True
         )
         if stats is not None:
             stats.slices_read += z1 - z0
             stats.slices.update(range(z0, z1))
             stats.seconds["decode"] = stats.seconds.get("decode", 0.0) + (t1 - t0)
+            if sigma > 0.0:
+                stats.seconds["anti-alias"] = (
+                    stats.seconds.get("anti-alias", 0.0) + (t2 - t1)
+                )
             stats.seconds["interpolate"] = (
-                stats.seconds.get("interpolate", 0.0) + time.perf_counter() - t1
+                stats.seconds.get("interpolate", 0.0) + time.perf_counter() - t2
             )
         return out
 
@@ -1068,8 +1270,21 @@ class ObliqueSampler:
         n = len(centreline.coords_um)
         size = geom.size_px
         out = np.zeros((n, size, size), dtype=np.float32)
+        sigmas = self.plane_sigmas(geom)
+        if stats is not None and len(sigmas):
+            filtered = sigmas > 0
+            stats.n_anti_aliased = int(filtered.sum())
+            if filtered.any():
+                stats.sigma_min_vox = float(sigmas[filtered].min())
+                stats.sigma_max_vox = float(sigmas.max())
         for lo, hi in self.plan(centreline, geom):
-            out[lo:hi] = self.sample(plane_points(centreline, geom, lo, hi), stats=stats)
+            # One sigma per run, by construction of `plan`; anything else would make
+            # a plane's filter depend on its block rather than on itself.
+            assert np.all(sigmas[lo:hi] == sigmas[lo])
+            out[lo:hi] = self.sample(
+                plane_points(centreline, geom, lo, hi),
+                sigma_vox=float(sigmas[lo]), stats=stats,
+            )
             if progress is not None:
                 progress(hi, n)
         return out
@@ -1081,10 +1296,17 @@ class ObliqueSampler:
         docstring -- give the exact raw box. A single plane that already exceeds the
         budget is still emitted on its own: splitting within a plane would help, and
         every real case is orders of magnitude under.
+
+        A run also ends wherever the anti-alias sigma changes rung
+        (:data:`ANTI_ALIAS_SIGMA_STEP`), so every plane in a run shares one filter. In
+        ``native``, ``fixed`` and ``manual`` modes the pitch is constant and this never
+        splits anything; in ``radius`` mode it adds a seam per rung crossed. The budget
+        is charged the pad the run's sigma actually needs.
         """
         corners = self._corners(centreline, geom)
         lo_i = np.minimum.reduce(corners, axis=1)
         hi_i = np.maximum.reduce(corners, axis=1)
+        sigmas = self.plane_sigmas(geom)
 
         runs: list[tuple[int, int]] = []
         n = len(lo_i)
@@ -1096,7 +1318,9 @@ class ObliqueSampler:
         for i in range(1, n):
             nlo = np.minimum(lo, lo_i[i])
             nhi = np.maximum(hi, hi_i[i])
-            if self._cost(nlo, nhi, self.pad) > self.budget and i > start:
+            pad = self.block_pad(sigmas[start])
+            rung_changes = sigmas[i] != sigmas[start]
+            if rung_changes or (self._cost(nlo, nhi, pad) > self.budget and i > start):
                 runs.append((start, i))
                 start, lo, hi = i, lo_i[i].copy(), hi_i[i].copy()
             else:
@@ -1233,6 +1457,9 @@ def build(
     seed_normal=None,
     native_scale=1.0,
     order=DEFAULT_ORDER,
+    anti_alias=True,
+    sharpen=DEFAULT_SHARPEN,
+    sharpen_sigma_px=DEFAULT_SHARPEN_SIGMA_PX,
     budget_mb=512.0,
     max_planes=8000,
     with_graph_points=True,
@@ -1249,9 +1476,17 @@ def build(
 
     ``step_um`` defaults to one raw voxel, which is where the information runs out --
     sampling finer than the acquisition invents detail, and the collision bound gets
-    tighter as the step shrinks for no gain.
+    tighter as the step shrinks for no gain. The raw voxel has to be isotropic for any
+    of that to mean one thing (:func:`isotropic_voxel_um`).
+
+    ``anti_alias`` low-passes the raw block wherever a plane's pitch is coarser than
+    the voxel (see :class:`ObliqueSampler`); off is for comparison, not for use.
+    ``sharpen`` is an :func:`unsharp_mask` applied to the sampled planes, off by
+    default, and when on it is written into the notes so an export says so. Its
+    overshoot is clipped to the stack's dtype range on the way back to it.
     """
     notes: list[str] = []
+    voxel_um = isotropic_voxel_um(frame)
     chains, chain_notes = chain_segments(graph, segment_ids)
     notes.extend(chain_notes)
     if not chains:
@@ -1274,7 +1509,7 @@ def build(
         raise ReformatError("the selected run is a single point")
 
     if step_um is None:
-        step_um = float(np.min(frame.raw_voxel))
+        step_um = voxel_um
     step_um = max(float(step_um), 1e-3)
 
     n_expect = int(np.ceil(chain.length_um / step_um)) + 1
@@ -1285,7 +1520,6 @@ def build(
             f"limit if you mean it."
         )
 
-    voxel_um = float(np.min(frame.raw_voxel))
     if mode == "native":
         # The frame size decides the width here, not the radii -- so the smoothing loop
         # is chasing one constant rather than something that moves as it resamples.
@@ -1329,9 +1563,23 @@ def build(
         )
 
     stats = SampleStats(order=int(order))
-    sampler = ObliqueSampler(stack, frame, budget_mb=budget_mb, order=order)
+    sampler = ObliqueSampler(
+        stack, frame, budget_mb=budget_mb, order=order, anti_alias=anti_alias
+    )
     before = (getattr(stack, "strip_reads", 0), getattr(stack, "whole_page_reads", 0))
     raw = sampler.sample_planes(centreline, geom, progress=progress, stats=stats)
+    if sharpen and float(sharpen) > 0.0:
+        import time
+
+        t0 = time.perf_counter()
+        raw = unsharp_mask(raw, sharpen, sharpen_sigma_px)
+        stats.seconds["sharpen"] = time.perf_counter() - t0
+        notes.append(
+            f"sharpened: unsharp mask, amount {float(sharpen):g}, sigma "
+            f"{float(sharpen_sigma_px):g} px, applied after sampling -- the values are "
+            f"no longer the acquisition's, and an edge read off them includes the "
+            f"overshoot"
+        )
     raw = _to_stack_dtype(raw, stack.dtype)
     stats.strip_reads = getattr(stack, "strip_reads", 0) - before[0]
     stats.whole_page_reads = getattr(stack, "whole_page_reads", 0) - before[1]

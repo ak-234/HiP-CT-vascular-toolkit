@@ -30,11 +30,11 @@ from .candidates import (
     TORTUOSITY_MAX,
     Bridge,
     _new_stats,
-    endpoint_tangent,
     gate_geometry,
     hermite_path,
     nearest_cross_component,
     resample_by_arclength,
+    tangent_for,
 )
 
 
@@ -51,6 +51,7 @@ def propose(
     stats: dict | None = None,
     reconnection_type: int | None = None,
     backbone_nodes: set[int] | None = None,
+    tangents: dict | None = None,
 ) -> list[Bridge]:
     """Propose end-to-end bridges between degree-1 nodes.
 
@@ -62,6 +63,12 @@ def propose(
     it proposed. Two of the ways a pair dies happen before a :class:`Bridge` exists
     (nothing within reach, and the same-component prune), so without this an empty
     result is indistinguishable from a graph with no free ends at all.
+
+    `tangents`, if given, maps a node to ``(outward unit direction, radius_um)`` and
+    replaces :func:`~.candidates.endpoint_tangent` for that node. A caller that has
+    measured the free ends more carefully -- against the segmentation, after
+    refinement -- passes them here rather than having the two-point estimate
+    silently used underneath.
     """
     from scipy.spatial import cKDTree
 
@@ -73,7 +80,7 @@ def propose(
 
     info: dict[int, tuple[np.ndarray, np.ndarray, float]] = {}
     for node in ends:
-        tangent = endpoint_tangent(graph, node)
+        tangent = tangent_for(graph, node, tangents)
         if tangent is None:
             continue
         direction, radius = tangent

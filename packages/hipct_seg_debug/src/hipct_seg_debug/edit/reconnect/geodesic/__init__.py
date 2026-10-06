@@ -69,6 +69,7 @@ from .apply import (
     GEOMETRY,
     ORIGINAL,
     RESKELETONISED,
+    WAVEFRONT,
     Applied,
     apply_one,
     apply_plan,
@@ -86,5 +87,5 @@ __all__ = [
     # committing
     "Applied", "apply_plan", "apply_one", "write_segmentation", "origin_counts",
     # provenance codes
-    "ORIGINAL", "GEOMETRY", "DPC", "GEODESIC", "RESKELETONISED",
+    "ORIGINAL", "GEOMETRY", "DPC", "GEODESIC", "RESKELETONISED", "WAVEFRONT",
 ]

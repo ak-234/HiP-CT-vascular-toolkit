@@ -358,6 +358,97 @@ def test_the_block_pad_grows_with_the_spline_order():
     assert rf.ObliqueSampler(stack, frame, order=5).pad >= rf.SPLINE_PAD[3]
 
 
+def test_the_block_pad_grows_with_the_anti_alias_sigma_too():
+    """The Gaussian is FIR: its reach is scipy's ``int(truncate * sigma + 0.5)``, and
+    the block has to carry that on top of the spline pad or the filtered values the
+    prefilter sees near the edge are wrong ones."""
+    stack = FakeStack(np.zeros((10, 10, 10), dtype=np.float32))
+    s = rf.ObliqueSampler(stack, unit_frame((10, 10, 10)), order=3)
+    assert s.block_pad(0.0) == s.pad
+    assert rf.gaussian_radius(0.0) == 0
+    assert rf.gaussian_radius(1.5) == 6
+    assert s.block_pad(1.5) == s.pad + 6
+
+
+def test_the_anti_alias_sigma_is_zero_at_one_voxel_per_pixel_and_grows_past_it():
+    """``sqrt(f^2 - 1) / 2`` on a 0.25 ladder, rounded up. The zero at ``f = 1`` is the
+    guarantee that a native stack is untouched, so it is pinned including the
+    ``1 + eps`` a floating-point division produces."""
+    assert rf.anti_alias_sigma(1.0) == 0.0
+    assert rf.anti_alias_sigma(1.0 + 1e-12) == 0.0
+    assert rf.anti_alias_sigma(0.3) == 0.0  # magnifying: nothing to band-limit
+    assert rf.anti_alias_sigma(2.0) == pytest.approx(1.0)   # sqrt(3)/2 = 0.866 -> 1.0
+    assert rf.anti_alias_sigma(3.0) == pytest.approx(1.5)   # sqrt(8)/2 = 1.414 -> 1.5
+    assert rf.anti_alias_sigma(1.5) == pytest.approx(0.75)  # 0.559 -> 0.75
+    got = rf.anti_alias_sigma(np.array([0.5, 1.0, 2.0, 3.0]))
+    assert np.allclose(got, [0.0, 0.0, 1.0, 1.5])
+    # Rounded *up*: no plane is ever under-filtered.
+    f = np.linspace(1.01, 6.0, 500)
+    assert np.all(rf.anti_alias_sigma(f) >= np.sqrt(f * f - 1) / 2 - 1e-12)
+
+
+@pytest.mark.parametrize("order", [3, 5])
+def test_integer_grid_samples_reproduce_the_raw_values(order):
+    """The spline is *interpolating*: it passes through the data.
+
+    This is the test that the B-spline is not being applied the wrong way round. A
+    cubic B-spline convolved straight onto the raw values -- the "Bourke" form -- is a
+    low-pass filter with a 1/6-4/6-1/6 footprint per axis, and on random data it misses
+    the grid values by a large fraction of their range. ``map_coordinates`` avoids that
+    by converting the values to spline coefficients first (``prefilter=True``, the
+    recursive all-pole filter), after which the spline returns every grid value
+    exactly. Both halves are asserted, so the test is known to discriminate.
+    """
+    from scipy import ndimage
+
+    shape = (30, 30, 30)
+    rng = np.random.default_rng(11)
+    volume = (rng.random(shape) * 1000.0).astype(np.float32)
+    stack = FakeStack(volume)
+    frame = unit_frame(shape)
+    sampler = rf.ObliqueSampler(stack, frame, order=order)
+
+    ijk = rng.integers(3, 27, size=(300, 3))            # raw (z, y, x)
+    pts = ijk[:, ::-1].astype(np.float64)               # world (x, y, z)
+    got = sampler.sample(pts)
+    want = volume[ijk[:, 0], ijk[:, 1], ijk[:, 2]]
+    assert np.allclose(got, want, rtol=0, atol=1e-2)
+
+    # The negative control: the smoothing spline, which is what a missing prefilter
+    # gives, and which is nowhere near the data.
+    smoothed = ndimage.map_coordinates(
+        volume, ijk.T.astype(np.float64), order=order, prefilter=False
+    )
+    assert np.abs(smoothed - want).max() > 50.0
+
+
+def test_a_step_edge_is_not_smoothed_by_the_spline():
+    """Sampled across a hard edge, the interpolating cubic rises in under a voxel; the
+    smoothing cubic's step response is the integral of the basis function and takes
+    well over one."""
+    from scipy import ndimage
+
+    shape = (20, 20, 60)
+    volume = np.zeros(shape, dtype=np.float32)
+    volume[:, :, 30:] = 1000.0
+    sampler = rf.ObliqueSampler(FakeStack(volume), unit_frame(shape), order=3)
+
+    x = np.arange(26.0, 34.0, 0.05)
+    pts = np.column_stack([x, np.full_like(x, 10.0), np.full_like(x, 10.0)])
+    profile = sampler.sample(pts)
+    reference = ndimage.map_coordinates(
+        volume, np.column_stack([np.full_like(x, 10.0), np.full_like(x, 10.0), x]).T,
+        order=3, prefilter=False,
+    )
+
+    def rise_width(p):
+        lo, hi = 0.1 * 1000.0, 0.9 * 1000.0
+        return x[np.argmax(p >= hi)] - x[np.argmax(p >= lo)]
+
+    assert rise_width(profile) < 1.0
+    assert rise_width(reference) > 1.0
+
+
 def test_samples_outside_the_volume_are_zero_on_every_axis():
     """z raises in ``read_slice`` while rows and cols zero-pad; both must give 0."""
     shape = (20, 20, 20)
@@ -385,8 +476,9 @@ def test_a_request_entirely_off_the_stack_reads_nothing():
     assert stats.outside == 1.0
 
 
+@pytest.mark.parametrize("px_vox", [None, 1.2, 3.0])
 @pytest.mark.parametrize("order", [0, 1, 3, 5])
-def test_chunking_does_not_change_the_answer(order):
+def test_chunking_does_not_change_the_answer(order, px_vox):
     """Exactly equal, not approximately -- the block pad is what makes it so.
 
     Two separate failures are guarded here, and the second is why this is parametrised.
@@ -400,6 +492,11 @@ def test_chunking_does_not_change_the_answer(order):
     of error, 8 leaves 4.5e-7, and 16 is exact. Since this asserts *exact* equality
     between a one-block run and a many-block one, it is the guard on
     :data:`reformat.SPLINE_PAD`.
+
+    ``px_vox`` above 1 under-samples, which switches the anti-alias Gaussian on (sigma
+    0.5 at 1.2, 1.5 at 3.0). That is FIR and position-independent, so it is held to
+    the same standard: bit-exact at order <= 1, and it is the guard on
+    :meth:`reformat.ObliqueSampler.block_pad` adding the Gaussian's reach.
     """
     shape = (60, 60, 60)
     rng = np.random.default_rng(7)
@@ -407,7 +504,9 @@ def test_chunking_does_not_change_the_answer(order):
     # so a wrong prefilter pad would not show up in it.
     stack = FakeStack(rng.random(shape).astype(np.float32))
     frame = unit_frame(shape)
-    line, geom = _straight_stack_geometry()
+    line, geom = _straight_stack_geometry(px_vox=px_vox)
+    if px_vox is not None:
+        assert geom.anti_alias_sigma_vox.min() > 0, "the geometry must under-sample"
 
     one = rf.ObliqueSampler(stack, frame, budget_mb=4096.0, order=order)
     many = rf.ObliqueSampler(stack, frame, budget_mb=0.02, order=order)
@@ -438,12 +537,118 @@ def test_the_block_plan_covers_every_plane_exactly_once():
     assert all(a[1] == b[0] for a, b in zip(runs, runs[1:]))
 
 
-def _straight_stack_geometry():
-    """A short diagonal run through the middle of a 60^3 volume."""
-    pts = np.linspace([15.0, 15.0, 15.0], [45.0, 45.0, 45.0], 40)
+def _straight_stack_geometry(px_vox=None):
+    """A short diagonal run through the middle of a 60^3 volume.
+
+    ``px_vox`` switches to an under-sampling ``manual`` geometry of that many voxels
+    per pixel on an 11 px frame, on a shorter run so the wider planes stay inside the
+    volume.
+    """
+    if px_vox is None:
+        pts = np.linspace([15.0, 15.0, 15.0], [45.0, 45.0, 45.0], 40)
+        line = rf.build_centreline(pts, np.full(len(pts), 3.0), step_um=1.0)
+        geom = rf.plane_geometry(line, mode="fixed", radii_k=2.0, size_px=11)
+        return line, geom
+    pts = np.linspace([22.0, 22.0, 22.0], [38.0, 38.0, 38.0], 30)
     line = rf.build_centreline(pts, np.full(len(pts), 3.0), step_um=1.0)
-    geom = rf.plane_geometry(line, mode="fixed", radii_k=2.0, size_px=11)
+    geom = rf.plane_geometry(
+        line, mode="manual", half_um=5.0 * px_vox, px_um=px_vox, voxel_um=1.0
+    )
+    assert geom.size_px == 11
     return line, geom
+
+
+def test_under_sampling_a_fine_stripe_beats_without_the_filter_and_not_with_it():
+    """A 2-voxel-period stripe sampled every 3 voxels lands alternately on a bright and
+    a dark column -- a beat pattern that is not in the tissue. Low-passed first, the
+    same samples read the stripe's mean, which is what a 3-voxel pixel should see."""
+    shape = (80, 60, 60)
+    x = np.arange(shape[2])
+    volume = np.broadcast_to(
+        (500.0 + 400.0 * np.where(x % 2 == 0, 1.0, -1.0)).astype(np.float32), shape
+    ).copy()
+    stack = FakeStack(volume)
+    frame = unit_frame(shape)
+
+    # Along world z, columns along world x, so the stripe runs across the image.
+    pts = np.linspace([30.0, 30.0, 30.0], [30.0, 30.0, 50.0], 21)
+    line = rf.build_centreline(
+        pts, np.full(len(pts), 3.0), step_um=1.0, seed_normal=np.array([1.0, 0.0, 0.0])
+    )
+    geom = rf.plane_geometry(line, mode="manual", half_um=15.0, px_um=3.0, voxel_um=1.0)
+    assert geom.size_px == 11
+    assert np.allclose(geom.oversampling, 1.0 / 3.0)
+    assert np.allclose(geom.anti_alias_sigma_vox, 1.5)
+    assert "under-sampling" in geom.describe()
+
+    off = rf.ObliqueSampler(stack, frame, anti_alias=False).sample_planes(line, geom)
+    stats = rf.SampleStats()
+    on = rf.ObliqueSampler(stack, frame, anti_alias=True).sample_planes(
+        line, geom, stats=stats
+    )
+
+    mid = geom.size_px // 2
+    assert np.ptp(off[:, mid, :]) > 700.0      # the alias: 100 / 900 alternating
+    assert np.ptp(on[:, mid, :]) < 8.0          # the mean, flat
+    assert abs(float(on.mean()) - 500.0) < 5.0
+    assert stats.n_anti_aliased == len(pts)
+    assert stats.sigma_min_vox == stats.sigma_max_vox == 1.5
+    assert "anti-alias" in stats.seconds
+    assert "anti-alias: 21 plane(s)" in stats.describe()
+
+    off_stats = rf.SampleStats()
+    rf.ObliqueSampler(stack, frame, anti_alias=False).sample_planes(
+        line, geom, stats=off_stats
+    )
+    assert off_stats.n_anti_aliased == 0
+    assert "anti-alias" not in off_stats.seconds
+
+
+def test_the_block_plan_splits_where_the_sigma_changes():
+    """Each run has one sigma, so a plane's filter depends on the plane and not on
+    which block the budget put it in."""
+    pts = np.linspace([10.0, 30.0, 30.0], [50.0, 30.0, 30.0], 41)
+    radii = np.linspace(8.0, 40.0, len(pts))  # 2 radii over 4 px -> 4 to 20 voxels/px
+    line = rf.build_centreline(pts, radii, step_um=1.0)
+    geom = rf.plane_geometry(line, mode="radius", radii_k=2.0, size_px=9, voxel_um=1.0)
+    sigmas = geom.anti_alias_sigma_vox
+    assert len(np.unique(sigmas)) > 2, "the ramp must cross several rungs"
+
+    stack = FakeStack(np.zeros((60, 60, 60), dtype=np.float32))
+    sampler = rf.ObliqueSampler(stack, unit_frame((60, 60, 60)), budget_mb=1e6)
+    runs = sampler.plan(line, geom)
+    assert len(runs) == len(np.unique(sigmas))
+    for lo, hi in runs:
+        assert np.all(sigmas[lo:hi] == sigmas[lo])
+    assert runs[0][0] == 0 and runs[-1][1] == len(pts)
+    assert all(a[1] == b[0] for a, b in zip(runs, runs[1:]))
+
+    # With the filter off there is one sigma (zero) and one run.
+    assert rf.ObliqueSampler(
+        stack, unit_frame((60, 60, 60)), budget_mb=1e6, anti_alias=False
+    ).plan(line, geom) == [(0, len(pts))]
+
+
+def test_an_anisotropic_voxel_is_refused_with_the_values_named():
+    shape = (20, 20, 20)
+    frame = WorldFrame(
+        raw_shape=shape, raw_voxel=np.array([1.0, 1.0, 2.0]),
+        seg_dims=np.array([20, 20, 20], dtype=np.int64), seg_origin=np.zeros(3),
+        seg_spacing=np.ones(3), nominal_voxel=np.ones(3),
+    )
+    with pytest.raises(rf.ReformatError, match=r"1\.0000 x 1\.0000 x 2\.0000"):
+        rf.isotropic_voxel_um(frame)
+    graph = graph_from([(5.0, 10.0, 10.0), (15.0, 10.0, 10.0)], [(0, 1, 11, 2.0)])
+    with pytest.raises(rf.ReformatError, match="anisotropic"):
+        rf.build(graph, frame, FakeStack(np.zeros(shape, dtype=np.uint16)), [0])
+    # Within tolerance is one voxel, the mean.
+    assert rf.isotropic_voxel_um(unit_frame(shape)) == 1.0
+    near = WorldFrame(
+        raw_shape=shape, raw_voxel=np.array([33.0, 33.0, 33.0 * (1 + 1e-5)]),
+        seg_dims=np.array([20, 20, 20], dtype=np.int64), seg_origin=np.zeros(3),
+        seg_spacing=np.ones(3), nominal_voxel=np.ones(3),
+    )
+    assert rf.isotropic_voxel_um(near) == pytest.approx(33.0, rel=1e-4)
 
 
 def test_a_real_tiff_directory_round_trips(tmp_path):
@@ -692,6 +897,58 @@ def test_build_produces_a_stack_with_everything_lined_up():
     assert out.mask[:, centre, centre].mean() > 0.95  # the lumen is on the centre pixel
     assert out.raw[:, centre, centre].mean() > 400    # ...and so is the bright core
     assert "planes" in out.describe()
+
+
+def test_sharpen_is_off_by_default_and_steepens_a_step_when_on():
+    """Off means *untouched*, not merely small; on means steeper edges and a note that
+    says the values are no longer the acquisition's."""
+    shape = (70, 70, 70)
+    axis = np.array([1.0, 0.6, 0.45])
+    direction = axis / np.linalg.norm(axis)
+    labels = tilted_cylinder(shape, axis, 7.0)
+    volume = (labels * 500 + 100).astype(np.uint16)
+    frame = unit_frame(shape)
+    ends = np.array([35.0, 35.0, 35.0]) + np.array([-18.0, 18.0])[:, None] * direction
+    graph = graph_from([tuple(ends[0]), tuple(ends[1])], [(0, 1, 40, 7.0)])
+    kw = dict(mode="fixed", radii_k=3.0, size_px=41, step_um=1.0)
+
+    plain = rf.build(graph, frame, FakeStack(volume), [0], **kw)
+    zero = rf.build(graph, frame, FakeStack(volume), [0], sharpen=0.0, **kw)
+    np.testing.assert_array_equal(plain.raw, zero.raw)
+    assert not any("sharpen" in n for n in plain.notes)
+    assert "sharpen" not in plain.stats.seconds
+
+    sharp = rf.build(graph, frame, FakeStack(volume), [0], sharpen=1.0, **kw)
+    steep = lambda r: np.abs(np.diff(r.astype(np.float64), axis=2)).max()  # noqa: E731
+    assert steep(sharp.raw) > steep(plain.raw)
+    assert sharp.raw.dtype == volume.dtype  # overshoot clipped back into range
+    assert any("sharpened" in n for n in sharp.notes)
+    assert "sharpen" in sharp.stats.seconds
+
+    x = np.ones((3, 5, 5), dtype=np.float32)
+    assert rf.unsharp_mask(x, 0.0, 1.0) is x
+    assert rf.unsharp_mask(x, None, 1.0) is x
+    np.testing.assert_allclose(rf.unsharp_mask(x, 2.0, 1.0), x)  # flat stays flat
+
+
+def test_the_plane_readout_says_whether_the_block_was_low_passed():
+    """From the stats, not the geometry: the geometry says what *would* run."""
+    from hipct_seg_debug.viewer_reformat import readout
+
+    shape = (40, 40, 40)
+    graph = graph_from([(10.0, 20.0, 20.0), (30.0, 20.0, 20.0)], [(0, 1, 21, 7.0)])
+    stack = FakeStack(np.zeros(shape, dtype=np.uint16))
+    # 3 radii of 7 on 11 px is 2.1 voxels per pixel.
+    kw = dict(mode="fixed", radii_k=3.0, size_px=11, step_um=1.0)
+    on = rf.build(graph, unit_frame(shape), stack, [0], **kw)
+    off = rf.build(graph, unit_frame(shape), stack, [0], anti_alias=False, **kw)
+    assert on.geometry.oversampling.min() < 1.0
+    assert "low-passed sigma" in readout(on, 3)
+    assert "NOT low-passed" in readout(off, 3)
+
+    native = rf.build(graph, unit_frame(shape), stack, [0], mode="native", size_px=11,
+                      step_um=1.0)
+    assert "under-sampled" not in readout(native, 3)
 
 
 def test_build_refuses_a_run_that_would_take_too_many_planes():

@@ -29,10 +29,11 @@ from ..candidates import resample_by_arclength
 
 #: Per-edge provenance. 0 is the file's own edges, so an unedited graph reads as
 #: "original" without anything having to write a column for it.
-ORIGINAL, GEOMETRY, DPC, GEODESIC, RESKELETONISED = 0, 1, 2, 3, 4
+ORIGINAL, GEOMETRY, DPC, GEODESIC, RESKELETONISED, WAVEFRONT = 0, 1, 2, 3, 4, 5
 ORIGIN_NAMES = {
     ORIGINAL: "original", GEOMETRY: "geometry", DPC: "dpc",
     GEODESIC: "geodesic", RESKELETONISED: "reskeletonised",
+    WAVEFRONT: "wavefront",
 }
 #: Amira field names for the provenance columns. Capitalised to match the
 #: convention of the fields Avizo itself writes.
@@ -69,7 +70,7 @@ class Applied:
 
 def apply_plan(graph, plan, source, frame, *, reviewed=None,
                label: str = "geodesic reconnect", reskeletonise: bool = True,
-               progress=None) -> list:
+               progress=None, origin: int = GEODESIC) -> list:
     """Commit every accepted candidate, as one undo step.
 
     `source` is a :class:`~..maskedit.MaskSource` -- the mask edits go into its
@@ -80,6 +81,9 @@ def apply_plan(graph, plan, source, frame, *, reviewed=None,
     `reviewed` is the set of candidates an operator has approved; they are applied
     alongside the automatically accepted ones and are marked as reviewed in the
     provenance, which is the distinction an audit needs to make later.
+
+    `origin` is the provenance code stamped on routed repairs; a re-skeletonised
+    break always records :data:`RESKELETONISED` whoever asked for it.
     """
     approved = list(plan.accepted())
     reviewed_set = {id(c) for c in (reviewed or ())}
@@ -91,7 +95,7 @@ def apply_plan(graph, plan, source, frame, *, reviewed=None,
             result = apply_one(
                 graph, candidate, source, frame,
                 reviewed=id(candidate) in reviewed_set,
-                reskeletonise=reskeletonise,
+                reskeletonise=reskeletonise, origin=origin,
             )
             out.append(result)
             if progress is not None:
@@ -100,7 +104,7 @@ def apply_plan(graph, plan, source, frame, *, reviewed=None,
 
 
 def apply_one(graph, candidate, source, frame, *, reviewed: bool = False,
-              reskeletonise: bool = True) -> Applied:
+              reskeletonise: bool = True, origin: int = GEODESIC) -> Applied:
     """Commit one candidate. Must be called inside a ``graph.batch``."""
     if candidate.kind == "reskeletonise":
         return _apply_reskeletonise(graph, candidate, source, frame, reviewed)
@@ -113,16 +117,16 @@ def apply_one(graph, candidate, source, frame, *, reviewed: bool = False,
     if reskeletonise:
         result = _reskeletonise_route(graph, candidate, source, frame)
         if result is not None and result.applied:
-            _stamp_patch(graph, result, GEODESIC, candidate, reviewed)
+            _stamp_patch(graph, result, origin, candidate, reviewed)
             return Applied(candidate, voxels_added=added, planes_touched=planes,
-                           reskeletonised=result, origin=GEODESIC)
+                           reskeletonised=result, origin=origin)
 
     # The re-derivation either was not asked for or found nothing to trace -- which
     # happens when the completion is a bare connectivity core one voxel wide. The
     # route itself is then the honest centreline, and it is welded directly.
-    sid = weld(graph, candidate, frame, reviewed=reviewed)
+    sid = weld(graph, candidate, frame, reviewed=reviewed, origin=origin)
     return Applied(candidate, segments=[] if sid is None else [sid],
-                   voxels_added=added, planes_touched=planes, origin=GEODESIC,
+                   voxels_added=added, planes_touched=planes, origin=origin,
                    ok=sid is not None,
                    reason="" if sid is not None else "the route could not be welded")
 
@@ -283,7 +287,7 @@ def _box_for(candidate, frame):
     return np.array([stacked.min(axis=0) - pad, stacked.max(axis=0) + pad])
 
 
-def weld(graph, candidate, frame, *, reviewed: bool = False):
+def weld(graph, candidate, frame, *, reviewed: bool = False, origin: int = GEODESIC):
     """Add the route to the graph as a segment, with its provenance.
 
     Used when re-skeletonisation found nothing to trace, which is the case where
@@ -331,7 +335,7 @@ def weld(graph, candidate, frame, *, reviewed: bool = False):
     radii = _radii_for(candidate, classified, len(coords))
     return graph.add_segment(
         source_node, target_node, coords, radii,
-        attrs=provenance_attrs(GEODESIC, candidate, reviewed),
+        attrs=provenance_attrs(origin, candidate, reviewed),
     )
 
 

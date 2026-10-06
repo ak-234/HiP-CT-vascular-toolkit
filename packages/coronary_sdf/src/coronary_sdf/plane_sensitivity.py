@@ -857,41 +857,69 @@ def _dense_graph_samples(graph: dict[str, Any], spacing_mm: float = 0.1) -> tupl
     return np.asarray(points), np.asarray(edge_ids), np.asarray(arc)
 
 
-def wall_band_metrics(
+def wall_segment_metrics(
     npz_path: Path,
     graph: dict[str, Any],
     planes: list[dict[str, Any]],
-    band_length_diameters: float,
     strict: bool = True,
-) -> dict[str, dict[str, float]]:
+) -> dict[str, dict[str, Any]]:
+    """Average all finite WSS point samples assigned to each anatomical edge.
+
+    Ownership uses the nearest densely sampled cropped centreline (0.1 mm).
+    Every exported wall node has one owner; midpoint radius and plane position
+    do not truncate tapered or curved segments. Caps must be excluded upstream
+    by the wall-only CFD export. Junction ownership is a nearest-edge partition.
+    """
     data = np.load(npz_path, allow_pickle=True); columns = [str(v) for v in data["columns"]]; values = data["values"]
     xyz = values[:, [_column(columns, ("X",)), _column(columns, ("Y",)), _column(columns, ("Z",))]]
     graph_points = np.vstack([np.asarray(edge["points_mm"], float) for edge in graph["edges"]])
     graph_span = float(np.linalg.norm(np.ptp(graph_points, axis=0))); value_span = float(np.linalg.norm(np.ptp(xyz, axis=0)))
     xyz_mm = xyz * (1000.0 if value_span < graph_span / 10 else 1.0)
     wss = values[:, _column(columns, ("Wall Shear", "Wall Shear Magnitude"))]
-    weights = np.asarray(data["surface_control_area"], float)
-    samples, sample_edges, sample_arcs = _dense_graph_samples(graph)
-    distance, nearest = cKDTree(samples).query(xyz_mm)
-    nearest_edge = sample_edges[nearest]; nearest_arc = sample_arcs[nearest]
-    edge_map = {int(edge["edge_id"]): edge for edge in graph["edges"]}
+    samples, sample_edges, _ = _dense_graph_samples(graph)
+    _, nearest = cKDTree(samples).query(xyz_mm)
+    nearest_edge = sample_edges[nearest]
     result = {}
     for plane in planes:
-        edge = edge_map[plane["edge_id"]]; _, length = polyline_arclength(np.asarray(edge["points_mm"], float))
-        local_radius = float(plane.get("section_equivalent_radius_mm", plane["midpoint_radius_mm"]))
-        half_band = band_length_diameters * local_radius
-        mask = (nearest_edge == plane["edge_id"]) & (np.abs(nearest_arc - length / 2.0) <= half_band) & (distance <= 1.8 * plane["midpoint_radius_mm"])
-        valid = mask & np.isfinite(wss) & np.isfinite(weights) & (weights > 0)
+        mask = nearest_edge == int(plane["edge_id"])
+        valid = mask & np.isfinite(wss)
         if np.count_nonzero(valid) < 8:
             if strict:
-                raise RuntimeError("Insufficient positive-area wall nodes for {}".format(plane["plane_id"]))
+                raise RuntimeError("Insufficient finite WSS wall points for {}".format(plane["plane_id"]))
             continue
-        result[plane["plane_id"]] = {"wss_mean_pa": float(np.average(wss[valid], weights=weights[valid])), "wss_max_pa": float(np.max(wss[valid])), "wall_band_nodes": int(np.count_nonzero(valid)), "wall_band_area_weight": float(np.sum(weights[valid]))}
+        result[plane["plane_id"]] = {"wss_mean_pa": float(np.mean(wss[valid])), "wss_max_pa": float(np.max(wss[valid])), "wall_segment_nodes": int(np.count_nonzero(valid)), "wall_segment_invalid_wss_nodes": int(np.count_nonzero(mask & ~np.isfinite(wss))), "wss_scope": "full_associated_segment_wall", "wss_edge_id": int(plane["edge_id"])}
     return result
 
 
 def adjacent_percent(coarse: float, fine: float) -> float:
     return 100.0 * abs(float(fine) - float(coarse)) / max(abs(float(fine)), 1.0e-30)
+
+
+def write_mesh_quality_summary(output: Path, report_dir: Path, diagnostics: list[dict[str, Any]]) -> Path:
+    """Combine measured CFX quality extrema/means with mesh element counts."""
+    rows = []
+    for case in sorted({row["case_id"] for row in diagnostics}):
+        stats = json.loads((output / "meshes" / case / "mesh_stats.json").read_text(encoding="utf-8"))
+        row = {"case_id": case, **{key: stats.get(key, "") for key in (
+            "total_elements", "core_elements", "boundary_layer_elements", "mesh_seconds",
+        )}}
+        for metric in diagnostics:
+            if metric["case_id"] != case:
+                continue
+            variable = metric["variable"]
+            for statistic in ("minimum", "volume_average", "maximum"):
+                value = float(metric[statistic])
+                name = variable
+                if variable == "orthogonality_angle_rad":
+                    name = "orthogonality_angle_degrees"
+                    value = math.degrees(value)
+                row[name + "_" + statistic] = value
+        row["source"] = "CFD-Post domain diagnostics"
+        row["courant_note"] = "Solver diagnostic, not a geometric mesh-quality metric"
+        rows.append(row)
+    path = report_dir / "mesh_quality_summary.csv"
+    _write_csv(path, rows)
+    return path
 
 
 def normalized_difference_percent(coarse: float, fine: float, normalization: float) -> float:
@@ -939,7 +967,7 @@ def _plots_and_tables(report_dir: Path, stem: str, planes: list[dict[str, Any]],
     import matplotlib.pyplot as plt
     labels = [p["plane_id"] for p in planes]
     figure, axes = plt.subplots(2, 3, figsize=(13.5, 8), constrained_layout=True)
-    titles = (("wss_mean_pa", "Mean WSS (Pa)"), ("wss_max_pa", "Maximum WSS (Pa)"), ("velocity_mean_m_s", "Mean velocity (m/s)"), ("velocity_max_m_s", "Maximum velocity (m/s)"), ("pressure_mean_pa", "Mean static pressure (Pa)"), ("pressure_drop_pa", "Inlet-referenced pressure drop (Pa)"))
+    titles = (("wss_mean_pa", "Segment mean WSS (Pa)"), ("wss_max_pa", "Segment maximum WSS (Pa)"), ("velocity_mean_m_s", "Mean velocity (m/s)"), ("velocity_max_m_s", "Maximum velocity (m/s)"), ("pressure_mean_pa", "Mean static pressure (Pa)"), ("pressure_drop_pa", "Inlet-referenced pressure drop (Pa)"))
     lookup = {(row["plane_id"], row["level"]): row for row in values}
     for axis, (metric, title) in zip(axes.flat, titles):
         for pid in labels:
@@ -955,8 +983,8 @@ def _plots_and_tables(report_dir: Path, stem: str, planes: list[dict[str, Any]],
     figure.savefig(report_dir / (stem + "_convergence.png"), dpi=220); plt.close(figure)
     rows = [row for row in convergence if row["metric"] in ("wss_mean_pa", "wss_max_pa", "velocity_mean_m_s", "velocity_max_m_s", "pressure_mean_pa", "pressure_drop_pa")]
     metric_labels = {
-        "wss_mean_pa": "Mean WSS (Pa)",
-        "wss_max_pa": "Max WSS (Pa)",
+        "wss_mean_pa": "Segment mean WSS (Pa)",
+        "wss_max_pa": "Segment max WSS (Pa)",
         "velocity_mean_m_s": "Mean velocity (m/s)",
         "velocity_max_m_s": "Max velocity (m/s)",
         "pressure_mean_pa": "Mean pressure (Pa)",
@@ -992,8 +1020,8 @@ def _velocity_wss_criterion_figures(report_dir: Path, convergence: list[dict[str
             ("velocity_max_m_s", "Maximum velocity"),
         ),
         "wss": (
-            ("wss_mean_pa", "Mean WSS"),
-            ("wss_max_pa", "Maximum WSS"),
+            ("wss_mean_pa", "Segment mean WSS"),
+            ("wss_max_pa", "Segment maximum WSS"),
         ),
     }
     category_titles = (("strahler", "Strahler-order planes"), ("radius_bin", "Radius-bin planes"))
@@ -1241,10 +1269,11 @@ def _all_vessel_group_results(
                 for level in LEVELS:
                     rows = [value_lookup[(plane_id, level)] for plane_id in plane_ids]
                     metric_array = np.asarray([float(row[metric]) for row in rows])
-                    weight_key = "wall_band_area_weight" if metric.startswith("wss") else "cfx_area_m2"
-                    weights = np.asarray([float(row[weight_key]) for row in rows])
+                    weights = None if metric.startswith("wss") else np.asarray([float(row["cfx_area_m2"]) for row in rows])
                     stat_by_level[level] = _distribution(metric_array, weights)
                 for statistic in ("equal_vessel_mean", "area_weighted_mean", "median", "q25", "q75", "iqr", "p95", "maximum"):
+                    if metric.startswith("wss") and statistic == "area_weighted_mean":
+                        continue
                     group_values.append({
                         "group_type": group_type, "group_value": group_value,
                         "metric": metric, "statistic": statistic, "vessel_count": len(members),
@@ -1255,10 +1284,10 @@ def _all_vessel_group_results(
                 for pair_name, _, fine_level in pairs:
                     differences = np.asarray([float(row[pair_name + "_percent"]) for row in vessel_rows])
                     fine_weights = np.asarray([
-                        float(value_lookup[(row["plane_id"], fine_level)]["wall_band_area_weight" if metric.startswith("wss") else "cfx_area_m2"])
+                        float(value_lookup[(row["plane_id"], fine_level)]["cfx_area_m2"])
                         for row in vessel_rows
                     ])
-                    stats = _distribution(differences, fine_weights)
+                    stats = _distribution(differences, None if metric.startswith("wss") else fine_weights)
                     valid_gci = [float(row["gci_fine_percent"]) for row in vessel_rows if row.get("gci_fine_percent") not in (None, "")]
                     group_convergence.append({
                         "group_type": group_type, "group_value": group_value,
@@ -1283,7 +1312,7 @@ def _all_vessel_group_figures(
     import matplotlib.pyplot as plt
 
     titles = {
-        "wss_mean_pa": "Mean WSS (Pa)", "wss_max_pa": "Maximum WSS (Pa)",
+        "wss_mean_pa": "Segment mean WSS (Pa)", "wss_max_pa": "Segment maximum WSS (Pa)",
         "velocity_mean_m_s": "Mean velocity (m/s)", "velocity_max_m_s": "Maximum velocity (m/s)",
     }
     for group_type, stem in (("strahler_order", "strahler"), ("radius_bin", "radius_bin")):
@@ -1446,9 +1475,9 @@ def run_all_vessel_group_sensitivity(
         print("[all-vessels] CFD-Post {}: {} midpoint planes".format(case, len(planes)), flush=True)
         section_rows = extract_cfx_velocity_planes(post, result_candidates[-1], planes, case_output / "all_vessel_velocity_sections.csv", resume)
         section_lookup = {row["plane_id"]: row for row in section_rows}
-        wall = wall_band_metrics(
+        wall = wall_segment_metrics(
             output / "extracted" / case / (case + "_wall.npz"), graph, planes,
-            float(settings["wss_wall_band_length_local_diameters"]), strict=False,
+            strict=False,
         )
         missing = {plane["plane_id"] for plane in planes} - set(wall)
         insufficient.update(missing)
@@ -1477,8 +1506,8 @@ def run_all_vessel_group_sensitivity(
                 "amira_midpoint_radius_mm": plane["midpoint_radius_mm"],
                 "endpoint_clearance_mm": plane["endpoint_clearance_mm"],
                 "amira_endpoint_clearance_diameters": plane.get("endpoint_clearance_diameters", ""),
-                "reason": "insufficient_positive_area_wall_nodes_on_at_least_one_mesh",
-                "detail": "fewer than 8 wall nodes in the one-diameter band",
+                "reason": "insufficient_finite_wss_wall_points_on_at_least_one_mesh",
+                "detail": "fewer than 8 finite WSS wall points on the associated segment",
             })
         planes = [plane for plane in planes if plane["plane_id"] not in insufficient]
         values = [row for row in values if row["plane_id"] not in insufficient]
@@ -1519,6 +1548,8 @@ def run_all_vessel_group_sensitivity(
         "element_counts": counts,
         "metrics": list(ALL_VESSEL_METRICS),
         "pressure_included": False,
+        "wss_scope": "full_associated_segment_wall",
+        "wss_weighting": "unweighted arithmetic mean of finite wall point WSS values",
         "group_statistics": ["equal_vessel_mean", "area_weighted_mean", "median", "q25", "q75", "iqr", "p95", "maximum"],
         "difference_method": "paired anatomical vessel differences before group aggregation",
         "criteria_percent": [5.0, 1.0],
@@ -1572,10 +1603,9 @@ def run_boundary_layer_thickness_sensitivity(
             cfx_root / case / "all_vessel_velocity_sections.csv", resume,
         )
         section_lookup = {row["plane_id"]: row for row in sections}
-        wall = wall_band_metrics(
+        wall = wall_segment_metrics(
             output / "extracted" / case / (case + "_wall.npz"),
             graph, planes,
-            float(settings["wss_wall_band_length_local_diameters"]),
             strict=False,
         )
         stats = json.loads((
@@ -1759,7 +1789,7 @@ def run_plane_sensitivity(cfg: dict[str, Any], resume: bool = True) -> Path:
         case_hotspots, case_hotspot_planes = extract_cfx_hotspots(post, res, case_dir / "quality_hotspots", all_planes, level, resume)
         hotspot_values.extend(case_hotspots)
         hotspot_plane_values.extend(case_hotspot_planes)
-        wall = wall_band_metrics(output / "extracted" / case / (case + "_wall.npz"), graph, all_planes, float(settings["wss_wall_band_length_local_diameters"]))
+        wall = wall_segment_metrics(output / "extracted" / case / (case + "_wall.npz"), graph, all_planes)
         inlet_pressure = _read_inlet_pressure(output / "extracted" / case / "metrics.csv")
         by_id = {r["plane_id"]: r for r in cfx_rows}
         for plane in all_planes:
@@ -1770,6 +1800,7 @@ def run_plane_sensitivity(cfg: dict[str, Any], resume: bool = True) -> Path:
             case_values.append(row)
     _write_csv(report_dir / "per_plane_values.csv", case_values)
     _write_csv(report_dir / "cfx_courant_mesh_quality.csv", diagnostic_values)
+    write_mesh_quality_summary(output, report_dir, diagnostic_values)
     _cfx_diagnostic_figure(report_dir, diagnostic_values, counts)
     _write_csv(report_dir / "cfx_quality_hotspot_proximity.csv", hotspot_values)
     _hotspot_proximity_figure(report_dir, hotspot_values)
@@ -1794,7 +1825,8 @@ def run_plane_sensitivity(cfg: dict[str, Any], resume: bool = True) -> Path:
             convergence.append(row)
     _write_csv(report_dir / "adjacent_differences_gci.csv", convergence)
     overlap_rows = []
-    sensitivity_metrics = {"wss_mean_pa", "wss_max_pa", "velocity_mean_m_s", "velocity_max_m_s"}
+    # Plane proximity is meaningful for plane velocity, not whole-segment WSS.
+    sensitivity_metrics = {"velocity_mean_m_s", "velocity_max_m_s"}
     for result in convergence:
         if result["metric"] not in sensitivity_metrics:
             continue
@@ -1854,6 +1886,6 @@ def run_plane_sensitivity(cfg: dict[str, Any], resume: bool = True) -> Path:
         cfg, graph, resume
     )
     area_errors = [float(row["area_relative_error"]) for row in case_values]
-    summary = {"status": "pass" if all(r["pass"] for r in plane_pass) else "non_converged", "plane_counts": {"strahler": len(strahler), "radius_bin": len(radius)}, "element_counts": counts, "pressure_normalizations_pa": pressure_normalizations, "maximum_cfx_to_stl_area_error_fraction": max(area_errors), "finest_cfx_to_stl_area_error_fraction": max(float(row["area_relative_error"]) for row in case_values if row["level"] == "l4"), "settings": settings, "pressure_reference": "existing area-weighted inlet POI_001 cross-section; changes normalized by each fine mesh's inlet-to-opening pressure drop", "steady_quantity_note": "Steady WSS and velocity are not labelled TAWSS or peak-systolic.", "all_vessel_group_analysis": str(all_vessel_summary), "adaptive_all_vessel_group_analysis": str(adaptive_summary) if adaptive_summary else None, "boundary_layer_thickness_analysis": str(thickness_summary) if thickness_summary else None, "planes": plane_pass}
+    summary = {"status": "pass" if all(r["pass"] for r in plane_pass) else "non_converged", "plane_counts": {"strahler": len(strahler), "radius_bin": len(radius)}, "element_counts": counts, "pressure_normalizations_pa": pressure_normalizations, "maximum_cfx_to_stl_area_error_fraction": max(area_errors), "finest_cfx_to_stl_area_error_fraction": max(float(row["area_relative_error"]) for row in case_values if row["level"] == "l4"), "settings": settings, "pressure_reference": "existing area-weighted inlet POI_001 cross-section; changes normalized by each fine mesh's inlet-to-opening pressure drop", "wss_scope": "full_associated_segment_wall", "wss_weighting": "unweighted arithmetic mean of finite wall point WSS values", "wall_assignment": "nearest cropped centreline sampled at 0.1 mm; junctions partitioned by nearest edge", "steady_quantity_note": "Steady WSS and velocity are not labelled TAWSS or peak-systolic.", "all_vessel_group_analysis": str(all_vessel_summary), "adaptive_all_vessel_group_analysis": str(adaptive_summary) if adaptive_summary else None, "boundary_layer_thickness_analysis": str(thickness_summary) if thickness_summary else None, "planes": plane_pass}
     summary_path = report_dir / "plane_sensitivity_summary.json"; summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     return summary_path

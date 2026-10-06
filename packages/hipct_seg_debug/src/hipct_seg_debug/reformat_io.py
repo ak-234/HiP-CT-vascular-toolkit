@@ -185,6 +185,9 @@ def _document(reformat, provenance: dict | None = None) -> dict:
             "order": int(stats.order),
             "strip_reads": int(stats.strip_reads),
             "whole_page_reads": int(stats.whole_page_reads),
+            "n_anti_aliased": int(stats.n_anti_aliased),
+            "sigma_min_vox": float(stats.sigma_min_vox),
+            "sigma_max_vox": float(stats.sigma_max_vox),
         },
         "chains": [
             {
@@ -318,11 +321,35 @@ def _readme(reformat) -> str:
         + ("  (constant)\n" if geom.px_um.max() - geom.px_um.min() < 1e-9 else
            "  (VARIES per plane -- see geom_px_um.npy)\n")
         + f"Mode             : {geom.mode}\n"
-        "\n"
+        + _processing_lines(reformat)
+        + "\n"
         "Note the plane spacing and the pixel pitch are different numbers, so the stack\n"
         "is not isotropic unless they happen to match. geometry.json carries the full\n"
         "per-plane geometry, and the .npy files beside it hold the centreline itself.\n"
     )
+
+
+def _processing_lines(reformat) -> str:
+    """What was done to the values after decoding, when anything was.
+
+    A stack that was low-passed before interpolation, or sharpened after it, is not
+    distinguishable from one that was not by looking at ``raw.tif`` -- and the second
+    is exactly the one a calibre should not be read off. So both are said here, next to
+    the pitch, rather than only in ``geometry.json``.
+    """
+    stats = reformat.stats
+    out = ""
+    if getattr(stats, "n_anti_aliased", 0):
+        out += (
+            f"Pre-filter       : {stats.n_anti_aliased} of {len(reformat.raw)} planes "
+            f"low-passed (Gaussian sigma {stats.sigma_min_vox:.2f}-"
+            f"{stats.sigma_max_vox:.2f} raw voxel) before interpolation, because the "
+            f"pixel is coarser than the voxel there\n"
+        )
+    for note in reformat.notes:
+        if note.startswith("sharpened"):
+            out += f"Sharpened        : {note}\n"
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -456,6 +483,10 @@ def _rebuild(arrays: dict, document: dict):
         seconds={k: float(v) for k, v in stat_doc["seconds"].items()},
         order=int(stat_doc["order"]), strip_reads=int(stat_doc["strip_reads"]),
         whole_page_reads=int(stat_doc["whole_page_reads"]),
+        # Added after the first saved stacks; `.get` so those still load.
+        n_anti_aliased=int(stat_doc.get("n_anti_aliased", 0)),
+        sigma_min_vox=float(stat_doc.get("sigma_min_vox", 0.0)),
+        sigma_max_vox=float(stat_doc.get("sigma_max_vox", 0.0)),
     )
     chains = tuple(
         rf.Chain(

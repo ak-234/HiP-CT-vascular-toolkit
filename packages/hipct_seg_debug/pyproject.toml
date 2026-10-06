@@ -78,6 +78,10 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest==9.1.1"]
+# The HamiltonFastMarching solver behind `connect --wavefront --engine agd`. Optional:
+# the built-in numba lattice engine needs nothing beyond the pins above, and nothing
+# imports agd unconditionally. Not verified on Windows conda.
+eikonal = ["agd"]
 dev = ["pytest==9.1.1", "ruff==0.14.3", "build==1.2.2", "twine==6.1.0"]
 
 [project.urls]

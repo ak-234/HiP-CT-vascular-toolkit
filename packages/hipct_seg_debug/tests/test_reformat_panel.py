@@ -443,6 +443,39 @@ def test_cubic_is_the_default_and_the_order_reaches_the_build(qapp, app):
     assert app.opened[-1].stats.order == 1
 
 
+def test_anti_alias_is_on_by_default_and_sharpen_off_and_both_reach_the_build(qapp, app):
+    """``fixed`` at 15 px on a radius-4 vessel is 2.3 voxels per pixel, so the default
+    build under-samples and the filter has something to do; unticking it must reach
+    the sampler, and the sharpen spinbox must reach the notes."""
+    from hipct_seg_debug import reformat as rf
+
+    panel = _panel(app)
+    assert panel.widgets["anti_alias"].isChecked()
+    assert panel.widgets["sharpen"].value() == rf.DEFAULT_SHARPEN == 0.0
+    assert panel.widgets["sharpen_sigma"].value() == rf.DEFAULT_SHARPEN_SIGMA_PX
+
+    def build():
+        panel.widgets["clear"].click()
+        app.picker.pick_segment(0)
+        panel.widgets["add"].click()
+        panel.widgets["mode"].setCurrentText("fixed")
+        panel.widgets["size_px"].setValue(15)
+        panel.widgets["show"].click()
+        _settle(qapp, panel)
+        return app.opened[-1]
+
+    out = build()
+    assert out.geometry.oversampling.min() < 1.0, "the fixture must under-sample"
+    assert out.stats.n_anti_aliased == out.n_planes
+    assert not any("sharpen" in n for n in out.notes)
+
+    panel.widgets["anti_alias"].setChecked(False)
+    panel.widgets["sharpen"].setValue(1.0)
+    out = build()
+    assert out.stats.n_anti_aliased == 0
+    assert any("sharpened" in n for n in out.notes)
+
+
 def test_match_voxel_sizes_the_grid_to_the_data(qapp, app):
     """And sizes it from the half-width the build will use, not the one asked for.
 

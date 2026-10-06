@@ -6,7 +6,7 @@ command, they are being asked to look at one break at a time and say whether the
 route the search found is the vessel or a shortcut through myocardium.
 
 So the panel is a work list, not a form. It loads a review file written by
-``connect --geodesic --review-json``, walks it one candidate at a time, and for
+``connect --geodesic --review-json`` (or ``--wavefront``), walks it one candidate at a time, and for
 each one shows the three things that actually decide the question:
 
 * **which mask components** the two ends are on, because "these are already one
@@ -455,8 +455,8 @@ def build_reconnect_panel(app):
             if not path:
                 return
         save(state["document"], path)
-        status(f"  wrote {path}. Re-run connect --geodesic --decisions-json to apply "
-               f"it.")
+        status(f"  wrote {path}. Re-run connect --geodesic (or --wavefront) "
+               f"--decisions-json to apply it.")
 
     open_button.clicked.connect(on_open)
     save_button.clicked.connect(on_save)

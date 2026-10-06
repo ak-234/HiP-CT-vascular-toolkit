@@ -81,7 +81,8 @@ class Corridor:
                 f"{source}")
 
 
-def bounds(points_um, frame, pad_um: float) -> tuple[np.ndarray, np.ndarray]:
+def bounds(points_um, frame, pad_um: float, *, max_voxels: int = MAX_VOXELS
+           ) -> tuple[np.ndarray, np.ndarray]:
     """A padded segmentation-index box enclosing a set of world points."""
     points = np.asarray(points_um, dtype=np.float64).reshape(-1, 3)
     ijk = np.asarray(frame.um_to_seg(points), dtype=np.float64)[:, ::-1]
@@ -103,7 +104,7 @@ def bounds(points_um, frame, pad_um: float) -> tuple[np.ndarray, np.ndarray]:
     lo = np.clip(lo, 0, dims)
     hi = np.clip(hi, lo + 1, dims)
     voxels = int(np.prod(hi - lo))
-    if voxels > MAX_VOXELS:
+    if voxels > max_voxels:
         raise CorridorTooLarge(
             f"{tuple(int(v) for v in (hi - lo))} = {voxels:,} segmentation voxels"
         )
@@ -155,7 +156,8 @@ def _sample_raw(frame, stack, lo, hi) -> np.ndarray:
 
 
 def for_candidate(frame, index, points_um, *, radius_um: float, stack=None,
-                  pad_factor: float = 6.0, min_pad_um: float = 0.0) -> Corridor:
+                  pad_factor: float = 6.0, min_pad_um: float = 0.0,
+                  max_voxels: int = MAX_VOXELS) -> Corridor:
     """The corridor one candidate needs: its own geometry, plus room to wander.
 
     Generous on purpose, and for the same reason :func:`~..roi.pad_for` is: a
@@ -167,5 +169,5 @@ def for_candidate(frame, index, points_um, *, radius_um: float, stack=None,
     spacing = np.asarray(frame.seg_spacing, dtype=np.float64)
     pad = max(pad_factor * float(radius_um), float(min_pad_um),
               MIN_SPAN * float(spacing.max()))
-    lo, hi = bounds(points_um, frame, pad)
+    lo, hi = bounds(points_um, frame, pad, max_voxels=max_voxels)
     return build(frame, index, lo, hi, stack=stack)

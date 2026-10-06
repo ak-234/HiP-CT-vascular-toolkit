@@ -56,13 +56,15 @@ def mode_for(argv: Sequence[str]) -> str:
 
     `connect` is the same shape of problem in reverse: cheap by default, but
     ``--dpc`` reads a TIFF window and runs a Sato filter per proposal, which is
-    minutes and must stay interruptible.
+    minutes and must stay interruptible -- and ``--geodesic`` / ``--wavefront``
+    index every mask component and search a corridor per candidate (the latter
+    refines the whole centreline first), which is longer still.
     """
     if not argv:
         return "subprocess"
     if argv[0] == "repair-radius" and not any(a == "--source=outlier" for a in argv):
         return "subprocess"
-    if argv[0] == "connect" and "--dpc" in argv:
+    if argv[0] == "connect" and any(a in argv for a in ("--dpc", "--geodesic", "--wavefront")):
         return "subprocess"
     return "inproc" if argv[0] in INPROC else "subprocess"
 

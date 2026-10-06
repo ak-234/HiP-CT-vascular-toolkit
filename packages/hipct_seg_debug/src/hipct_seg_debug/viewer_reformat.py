@@ -123,6 +123,14 @@ def readout(reformat, i: int) -> str:
         scale += f" = {over:.1f}x the {geom.voxel_um:.1f} um voxel"
         if over > 1.5:
             scale += " (magnified)"
+        # Below 1 the grid is coarser than the data; say whether the block was
+        # low-passed for it, from the stats (what ran) rather than the geometry
+        # (what would have, had the filter been on).
+        sigma = geom.anti_alias_sigma_vox[i]
+        if sigma > 0:
+            ran = getattr(reformat.stats, "n_anti_aliased", 0) > 0
+            scale += (f" (under-sampled, low-passed sigma {sigma:.2f} vox)" if ran
+                      else " (under-sampled, NOT low-passed)")
     return (
         f"plane {i + 1} / {len(reformat.raw)}    s = {line.arclen_um[i] / 1000:.2f} mm"
         f"    segment {int(line.seg_ids[i])}\n"

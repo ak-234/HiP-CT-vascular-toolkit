@@ -117,6 +117,23 @@ def endpoint_tangent(graph, node: int, max_reach_um: float = 10.0 * 40.0
     return None
 
 
+def tangent_for(graph, node: int, tangents=None) -> tuple[np.ndarray, float] | None:
+    """A caller-supplied end tangent when one exists, else the two-point estimate.
+
+    `tangents` maps a node to ``(outward unit direction, radius_um)``. It is how a
+    proposer is handed the better measurement a refinement pass produced, without
+    every proposer growing its own notion of where a tangent comes from.
+    """
+    if tangents is not None and node in tangents:
+        direction, radius = tangents[node]
+        direction = np.asarray(direction, dtype=np.float64).reshape(3)
+        norm = float(np.linalg.norm(direction))
+        if norm < 1e-9 or not np.isfinite(norm):
+            return None
+        return direction / norm, max(float(radius), MIN_RADIUS_UM)
+    return endpoint_tangent(graph, node)
+
+
 def hermite_path(
     p0: np.ndarray, t0: np.ndarray, p1: np.ndarray, t1: np.ndarray, n: int
 ) -> np.ndarray:

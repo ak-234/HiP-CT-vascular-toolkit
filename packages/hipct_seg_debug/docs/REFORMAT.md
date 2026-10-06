@@ -269,6 +269,20 @@ the 5th percentile.
 Whichever mode is in use, the report states the factor rather than leaving a soft
 picture unexplained.
 
+**Nor must it ask for less.** The mirror failure is a pitch *coarser* than the voxel —
+`radius` or `fixed` mode on a large vessel (at 4 radii on 129 px, anything over 16
+voxels of radius, ~530 µm at 33 µm; a proximal coronary at 1.5 mm is sampled every
+~3 voxels), or `native_scale > 1`. Sampling every third voxel of a texture that varies
+every voxel does not average it; it picks one voxel in three, and fine structure aliases
+into a beat pattern that is not in the tissue. So wherever the pitch exceeds the voxel
+the raw block is low-passed with a Gaussian sized to the ratio *before* it is
+interpolated (§5.1). The sigma is exactly zero at one voxel per pixel, so a `native`
+stack is untouched bit for bit, and the report says at how many planes it ran.
+
+Both failures are the same statement: **the pixel should be the voxel.** Above it the
+kernel shows; below it the data folds. `native` mode is the one that gets it right by
+construction, and the filter is what makes the other three honest when they go below.
+
 ---
 
 ## 3. Plane size: the four modes
@@ -292,7 +306,9 @@ construction, whatever the vessel is doing. The frame is a *window on the data* 
 than an enlargement of it.
 
 `native_scale` samples at that many voxels per pixel — 2.0 gives a wider view at half
-resolution. That undersamples; it never magnifies.
+resolution. That undersamples; it never magnifies. Above 1 the anti-alias pre-filter
+runs (§5.1), so "half resolution" means a properly band-limited half, not every second
+voxel.
 
 > **`native` does not apply the curvature clamp, and that is deliberate.** In the
 > width-driven modes clamping is right because the pitch is derived from the
@@ -305,18 +321,22 @@ resolution. That undersamples; it never magnifies.
 
 Half-width is `radii_k` × the *local* radius on a fixed pixel grid, so a capillary and
 an artery both fill the frame. The physical scale then varies down the stack — which is
-why the napari window cannot show a physical ruler in this mode (§6).
+why the napari window cannot show a physical ruler in this mode (§6). It magnifies on
+small vessels and under-samples on large ones, sometimes both in one stack; the
+pre-filter follows the pitch plane by plane (§5.1).
 
 ### `fixed`
 
 One half-width for the whole stack, `radii_k` × the largest radius on the path.
 Physically comparable end to end, at the price of a mostly-empty frame wherever the
 vessel is small. The tightest bend clamps it for everyone; keeping a per-plane width
-here would quietly turn it back into `radius` mode.
+here would quietly turn it back into `radius` mode. Under-samples whenever
+`radii_k × r_max` exceeds `size_px / 2` voxels, and is pre-filtered when it does.
 
 ### `manual`
 
-`half_um` and `px_um` exactly as given; `size_px` follows.
+`half_um` and `px_um` exactly as given; `size_px` follows. A `px_um` above the voxel is
+pre-filtered like the others.
 
 ---
 
@@ -363,6 +383,8 @@ want the other vessels too, reformat them as separate stacks.
 | **size** | the mode (§3). `native` is the default. |
 | **px** (`size_px`) | the output frame, in pixels. Forced odd, so the centreline lands on an exact centre pixel rather than between two. |
 | **interpolation** | spline order for the raw greyscale: nearest (0), linear (1), **cubic (3, default)**, quintic (5). See §5.1. |
+| **low-pass before under-sampling** (`anti_alias`) | on by default. Where a plane's pixel is coarser than the raw voxel, the raw block is blurred with a Gaussian sized to the ratio before it is interpolated, so fine texture does not alias into a beat pattern. Does nothing at one voxel per pixel or finer. Off is for seeing what it removes, not for use. See §5.1. |
+| **sharpen** / **sigma px** | `0` = off, the default. An unsharp mask on the sampled planes: `amount × (image − blur)` added back. Cosmetic — it steepens edges but cannot recover detail the acquisition lacks, and it overshoots either side of a real edge. Written into the notes so an export says so. See §5.1. |
 | **Match voxel** | sizes the grid to the data. In `native` the pitch is already matched, so it sets the *frame* to about `radii_k` median radii across. In the other modes it sets `size_px` so `um/px` lands near one voxel — computed from the half-width the build will **actually use**, including any curvature clamp. |
 | **half-width (radii)** (`radii_k`) | the multiplier for `radius` and `fixed`. Inert in `native` (except as the "how much context" hint for Match voxel) and in `manual`. |
 | **half um** / **um/px** | `manual` mode only. |
@@ -470,6 +492,20 @@ box-average 2× to a coarse grid, restore onto the original grid, compare to tru
 Quintic buys 2% more for three times the cost. Windowed sinc (as ITK offers) would land
 near that same ceiling — which, with cubic already at 73%, is not worth a dependency.
 
+**The spline is the interpolating kind.** There is a common way to get a B-spline wrong:
+convolve the raw values with the basis function directly (the "Bourke" form). That is a
+low-pass filter with a 1/6-4/6-1/6 footprint per axis, and it gives a visibly soft
+image that no amount of order buys back. What `map_coordinates` does instead is
+*generalised interpolation*: the raw values are first converted to spline
+**coefficients** by a recursive causal/anti-causal all-pole filter — the exact inverse of
+that convolution, and a sharpening step — so that the spline evaluated at a grid point
+returns the grid value exactly. That is `prefilter=True`, scipy's default; it is passed
+explicitly in the sampler so it cannot be dropped unnoticed, and two tests are the
+proof it is on: `test_integer_grid_samples_reproduce_the_raw_values` (grid samples
+equal the raw values to 1e-2 at orders 3 and 5, where the smoothing form misses by
+> 50 on a 0–1000 range) and `test_a_step_edge_is_not_smoothed_by_the_spline` (a hard
+edge rises 10–90% in under one voxel, against well over one for the smoothing form).
+
 > **The pad is not cosmetic above order 1.** `map_coordinates` prefilters for
 > `order ≥ 2`, and the spline prefilter is an **IIR filter** — it is *not local*, so a
 > per-block prefilter differs from a whole-volume one well in from the block edge.
@@ -478,8 +514,66 @@ near that same ceiling — which, with cubic already at 73%, is not worth a depe
 > `test_chunking_does_not_change_the_answer` is the guard.
 
 The one genuine exception: a block clipped at the **true volume boundary** cannot carry
-its pad, so its prefilter differs there. That is at the edge of the data, where there is
-nothing to recover anyway.
+its pad, so its prefilter (and its anti-alias filter, below) differs there. That is at
+the edge of the data, where there is nothing to recover anyway.
+
+#### Anti-alias: low-pass before under-sampling
+
+Interpolation, however good, only answers "what is the value *here*". When the pixel
+pitch is `f > 1` voxels, asking that question every `f` voxels of a texture that varies
+every voxel does not average the texture — it picks one voxel in `f`, and structure
+above the new Nyquist folds down into a beat pattern that is not in the tissue. The fix
+is to band-limit the *block* before interpolating, never the output (blurring the output
+blurs the alias; it does not remove it).
+
+The filter is an isotropic Gaussian in raw voxels, sigma from `anti_alias_sigma`:
+
+| voxels per pixel `f` | sigma (voxels) |
+|---|---|
+| ≤ 1 | **0** — nothing happens; a `native` stack is untouched bit for bit |
+| 1.5 | 0.75 |
+| 2 | 1.0 |
+| 3 | 1.5 |
+| 4 | 2.0 |
+
+The formula is `sqrt(f² − 1) / 2`: model the voxel as a Gaussian aperture of sigma ½, an
+output pixel of pitch `f` needs an aperture of sigma `f/2`, and the blur to add is the
+difference in quadrature. It is exactly zero at `f = 1`. skimage's `(f − 1)/2` is too
+light for a *discrete* kernel — at `f = 2` its sigma of 0.5 (sampled kernel 0.79, 0.11,
+0.11) still passes 57% of a Nyquist stripe; the 1.0 used here passes 1.4%, and 1.5 at
+`f = 3` passes 7e-5. The sigma is rounded **up** to a 0.25-voxel ladder
+(`ANTI_ALIAS_SIGMA_STEP`), and the block planner ends a run wherever the rung changes,
+so every plane in a block shares one filter and a plane's filter depends on the plane,
+not on which block the budget put it in. That is what keeps
+`test_chunking_does_not_change_the_answer` true with the filter on: it is parametrised
+over under-sampling pitches and still asserts bit-exact equality at orders 0 and 1.
+
+The Gaussian is FIR with reach `int(4σ + 0.5)` (scipy's own `lw` at
+`truncate = 4`), so the block pad becomes `SPLINE_PAD[order] + int(4σ + 0.5)`
+(`ObliqueSampler.block_pad`): the Gaussian is wrong only within its own reach of the
+block edge, and the spline pad sits inside that.
+
+Because the Gaussian is isotropic in voxels it also low-passes **along** the vessel,
+where the plane step is one voxel. At `f = 3` that leaves the stack with a 3-voxel
+resolution in all three directions, rather than 3 across and 1 along the axis you
+scroll. And because it is isotropic in voxels, the voxel has to be: `build` refuses an
+anisotropic `raw_voxel` (§9).
+
+`test_under_sampling_a_fine_stripe_beats_without_the_filter_and_not_with_it` is the
+guard: a 2-voxel-period stripe sampled every 3 voxels comes back alternating 100/900
+with the filter off and flat at 500 with it on.
+
+#### Post-sharpen
+
+`sharpen` (default 0, off) is an unsharp mask on the sampled planes, applied after
+sampling and before the cast back to the stack's dtype: `image + amount × (image −
+gaussian(image, sigma_px))`, two-dimensional, per plane. It is **cosmetic**: it steepens
+every edge, including the ones the interpolation kernel softened at a magnifying pitch,
+but it cannot put back detail the acquisition does not have, and it overshoots on both
+sides of a real edge — a calibre read off a sharpened stack is a calibre read off the
+overshoot. When it runs, the note `sharpened: unsharp mask, amount …` is written into
+the stack's notes and therefore into every export's README, so a stack that has been
+through it says so.
 
 ### 5.2 Reading the images
 
@@ -565,6 +659,11 @@ centre  x 41,203  y 18,772  z 92,431 um
 r_graph 640 um    half 990 um    33.0 um/px = 1.0x the 33.0 um voxel    R_curv 2,302 um
 ```
 
+Above 1.5× the scale term is tagged `(magnified)`; below 1× it is tagged
+`(under-sampled, low-passed sigma 1.50 vox)` or, if the build was made with the filter
+off, `(under-sampled, NOT low-passed)` — from what actually ran, not from what the
+geometry would have asked for.
+
 ---
 
 ## 7. The 3D window
@@ -597,15 +696,31 @@ sampling: 1 block(s), 348 slice reads over 348 distinct slices
   order 3; decode 13.5s, interpolate 1.9s
 ```
 
+A `fixed` build on a large vessel adds the under-sampling lines:
+
+```
+planes: 129x129 px, half-width 6,000-6,000 um (93.8-93.8 um/px), mode 'fixed'
+  sampling 0.35-0.35x the 33.0 um voxel
+  under-sampling at 707 of 707 planes (down to 0.35x): the block is low-passed with a
+  1.50-1.50 voxel Gaussian before interpolation, unless anti-alias is off
+sampling: 3 block(s), 420 slice reads over 376 distinct slices (44 re-read at block seams)
+  anti-alias: 707 plane(s) pre-filtered, sigma 1.50-1.50 voxel
+  order 3; decode 15.1s, anti-alias 0.8s, interpolate 1.9s
+  note: sharpened: unsharp mask, amount 1, sigma 1 px, applied after sampling -- ...
+```
+
 | line | what to look at |
 |---|---|
 | **curvature** | the tightest radius on the run. If the half-width is near it, the planes are near folding. |
-| **sampling Nx the voxel** | above ~1.5 the section is *magnified rather than resolved*. This is the line that explains a soft picture. |
+| **sampling Nx the voxel** | above ~1.5 the section is *magnified rather than resolved*. This is the line that explains a soft picture. Below 1 the grid is coarser than the data, and the next line says what was done about it. |
+| **under-sampling at N planes … low-passed** | the geometry's prediction: which planes have a pitch above the voxel and the sigma they get (§5.1). |
+| **anti-alias: N plane(s) pre-filtered** | what actually ran. Absent when nothing under-sampled or the checkbox was off — so a build with the first line and not this one was built with the filter off. |
+| **sharpened: unsharp mask** | the values have been through the post-sharpen and are no longer the acquisition's (§5.1). |
 | **half-width clamped at N planes** | the curvature bound cut the field of view. Because `size_px` is fixed, that turns straight into magnification in the width-driven modes — on one real segment a 982 µm request clamped to 181 µm, which at 129 px is 2.8 µm/px: **11.65× magnified**. |
 | **the fixed frame reaches past the curvature bound** | `native` only. Not clamped; reduce `size_px` to the suggested value if those planes matter. |
 | **slice reads over distinct slices** | a gap between them is re-reading at block seams. |
 | **whole-page decode** | the strip reader fell back. Expect ~19× the cost. |
-| **decode / interpolate** | which half to attack. Decode responds to how the TIFFs are stored, interpolation to the spline order. |
+| **decode / anti-alias / interpolate** | which phase to attack. Decode responds to how the TIFFs are stored, interpolation to the spline order; anti-alias appears only when it ran and grows with the sigma. |
 | **the selection is N separate runs** | the selection was not one chain (§4). |
 | **built the longest run only** | which segments went into the stack, and which were left out. |
 | **notes** | smoothing passes, move limits, disjointness failures. |
@@ -635,6 +750,14 @@ actually looking at.
 - **A kink at the very first or last point cannot be smoothed out**, because the ends
   are pinned to their nodes. Only the clamp helps there.
 - **`radius` mode has no honest in-plane ruler** (§6).
+- **Anisotropic raw voxels are refused.** The sampler's grid, its default step and its
+  anti-alias filter are all isotropic in voxels, so `build` checks the three components
+  of `raw_voxel` agree to 0.1% and raises naming them otherwise. The production path
+  broadcasts one `--voxel-um` to three, so this only bites a frame built from the
+  segmentation's own spacing.
+- **The anti-alias filter is isotropic**, so it costs along-vessel resolution when the
+  in-plane pitch is coarse (§5.1). An in-plane-only filter would mean sampling every
+  plane at native pitch and decimating, at `f²` the interpolation cost; not done.
 - **No parallel decode.** The strip reader is the structural win; a thread pool over
   slices would likely give several × more, since LZW decode releases the GIL. Deferred
   deliberately — there is no precedent for I/O parallelism in this package, and the

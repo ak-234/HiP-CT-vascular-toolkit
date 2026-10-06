@@ -145,8 +145,76 @@ def scene(volume, graph_builder, *, radius_um=20.0, shape=SHAPE):
     return graph_builder(frame), index, frame, source
 
 
+
+
+# ------------------------------------------------------------ raw greyscale
+#
+# The wavefront tests need what the mask-only fixtures above cannot give: an image
+# in which a vessel is *visible* where the segmentation has nothing. HiP-CT lumen is
+# dark and the myocardium around it bright, so these are dark-lumen phantoms.
+
+LUMEN, WALL = 10.0, 100.0
+
+
+def greyscale(mask, *, lumen=LUMEN, wall=WALL, noise=4.0, blur=0.8, seed=0,
+              faint=None) -> np.ndarray:
+    """A dark-lumen greyscale over a mask, blurred and noised like a scan.
+
+    `faint`, if given, is a second boolean mask painted at ``lumen + faint * (wall -
+    lumen)`` -- lumen the segmentation missed, still darker than tissue. That is
+    the pinched slit: a vessel the image shows and the mask does not.
+    """
+    rng = np.random.default_rng(seed)
+    image = np.full(np.shape(mask), float(wall))
+    if faint is not None:
+        level, where = faint
+        image[np.asarray(where, dtype=bool)] = lumen + level * (wall - lumen)
+    image[np.asarray(mask, dtype=bool)] = float(lumen)
+    if blur:
+        from scipy import ndimage
+
+        image = ndimage.gaussian_filter(image, blur)
+    image += rng.normal(0.0, noise, size=image.shape)
+    return image.astype(np.float32)
+
+
+def ribbon_gap(shape, half_y, half_z, x0, x1, gap, *, faint=0.5, cy=CY, cz=CZ):
+    """A ribbon with its mask missing over ``gap = (a, b)`` but its image not.
+
+    Returns ``(mask, image)``: the mask is the ribbon minus the gap, the image is
+    the dark ribbon throughout, at `faint` of the wall level inside the gap.
+    """
+    whole = ribbon(shape, half_y, half_z, x0, x1, cy=cy, cz=cz).astype(bool)
+    a, b = gap
+    mask = whole.copy()
+    mask[:, :, a:b] = False
+    trace = whole & ~mask
+    return mask.astype(np.uint8), greyscale(mask, faint=(faint, trace))
+
+
+class FakeStack:
+    """The windowed-read surface of ``TiffStack``, over a segmentation-grid image.
+
+    :func:`make_frame` puts the raw grid at twice the segmentation resolution, so
+    the image is upsampled by two on every axis to sit where the frame expects it.
+    """
+
+    def __init__(self, image_seg_grid):
+        img = np.asarray(image_seg_grid, dtype=np.float32)
+        self.volume = np.repeat(np.repeat(np.repeat(img, 2, 0), 2, 1), 2, 2)
+        self.shape = self.volume.shape
+        self.nominal_voxel_um = SPACING / 2
+
+    def read_stack_window(self, z0, z1, y0, y1, x0, x1):
+        return self.volume[z0:z1, y0:y1, x0:x1]
+
+    def read_slice(self, z):
+        return self.volume[z]
+
+
 __all__ = [
     "SHAPE", "SPACING", "CY", "CZ", "FakeLattice", "mask_source", "decode",
     "ribbon", "curved_tube", "curved_run", "axis_run", "broken_graph", "scene",
     "cylinder", "slit", "make_frame",
+    "LUMEN", "WALL", "greyscale", "ribbon_gap", "FakeStack",
 ]

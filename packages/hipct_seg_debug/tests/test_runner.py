@@ -72,6 +72,10 @@ def test_connect_is_only_cheap_without_the_dpc_walk():
     assert mode_for(["connect", "g.am"]) == "inproc"
     assert mode_for(["connect", "g.am", "--tjunction"]) == "inproc"
     assert mode_for(["connect", "g.am", "--dpc", "--raw", "d/"]) == "subprocess"
+    # The two mask-and-graph connectors index every component and search a corridor
+    # per candidate; the wavefront one refines the whole centreline first.
+    assert mode_for(["connect", "g.am", "--geodesic", "--seg", "s.am"]) == "subprocess"
+    assert mode_for(["connect", "g.am", "--wavefront", "--seg", "s.am"]) == "subprocess"
 
 
 def test_an_empty_argv_does_not_crash():

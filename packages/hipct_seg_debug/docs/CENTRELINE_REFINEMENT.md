@@ -48,6 +48,12 @@ Defaults are 25 iterations, 32 sample stations per segment, strength 0.1 and a
 Non-convergence, insufficient support, blocked moves and pre-existing outside
 edges are reported. No new method has been promoted into `optimise-skeleton`.
 
+`connect --wavefront` runs this refinement itself over the whole graph before
+proposing any reconnection (`--refine-method`, default `centroid-coherent`;
+`none` to skip on an already refined input), remeasures radii the same way, and
+writes the same `centreline_displacement_um` field. See
+[WAVEFRONT_RECONNECTION.md](WAVEFRONT_RECONNECTION.md).
+
 ## Optional reconstruction layout
 
 ```

@@ -655,7 +655,8 @@ def propose(graph, mask_ends, associations=None, *,
             cone_length_factor: float | None = None,
             radius_ratio_max: float | None = None,
             tortuosity_max: float | None = None,
-            keep_rejected: bool = False, stats: dict | None = None) -> list:
+            keep_rejected: bool = False, stats: dict | None = None,
+            tangents: dict | None = None) -> list:
     """Bridges from graph free ends to mask free ends, through the same gates.
 
     Deliberately the same gates as :mod:`..endpoints`, applied to the same kind of
@@ -682,10 +683,10 @@ def propose(graph, mask_ends, associations=None, *,
         RADIUS_RATIO_MAX,
         TORTUOSITY_MAX,
         Bridge,
-        endpoint_tangent,
         gate_geometry,
         hermite_path,
         resample_by_arclength,
+        tangent_for,
     )
 
     cone_angle_deg = CONE_ANGLE_DEG if cone_angle_deg is None else cone_angle_deg
@@ -713,7 +714,7 @@ def propose(graph, mask_ends, associations=None, *,
             association = associations.get(node)
             if association is not None and not association.associated:
                 continue
-        tangent = endpoint_tangent(graph, node)
+        tangent = tangent_for(graph, node, tangents)
         if tangent is None:
             continue
         t0, r0 = tangent

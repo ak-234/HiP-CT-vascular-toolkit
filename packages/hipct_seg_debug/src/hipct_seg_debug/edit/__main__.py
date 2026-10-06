@@ -320,6 +320,57 @@ def build_parser() -> argparse.ArgumentParser:
                          help="the smallest patch of undescribed lumen that may "
                               "carry a mask free end (default 20)")
 
+    # ---- the wavefront connector: tensor metric, wave propagation, long gaps --
+    # Shares the geodesic connector's outputs, review files and gates; differs in
+    # cleaning the graph first, pricing the corridor with a direction, and sweeping
+    # a front rather than searching a path. Mutually exclusive with the other two.
+    connect.add_argument("--wavefront", action="store_true",
+                         help="tensor-guided wavefront reconnection for large gaps: "
+                              "refine the centreline against --seg first, then route "
+                              "each break with an anisotropic (structure-tensor) "
+                              "metric and wave propagation, keypoint-chaining across "
+                              "dropouts; needs --seg, and --raw for anything but the "
+                              "shortest mask gaps. Shares --out-seg, --review-json, "
+                              "--decisions-json and --alternatives with --geodesic")
+    connect.add_argument("--refine-method", default="centroid-coherent",
+                         choices=("none", "centroid-spline", "centroid-coherent",
+                                  "laplacian", "taubin"),
+                         help="with --wavefront, the centreline refinement run on the "
+                              "whole graph before anything is proposed (default "
+                              "centroid-coherent; none skips it)")
+    connect.add_argument("--refine-strength", type=float, default=0.1)
+    connect.add_argument("--refine-workers", type=int, default=1,
+                         help="threads for the refinement and radius remeasurement")
+    connect.add_argument("--reach-radii", type=float, default=None,
+                         help="with --wavefront, how far a free end may look for a "
+                              "partner, in endpoint radii (default 40)")
+    connect.add_argument("--keypoint-step", type=float, default=None,
+                         help="with --wavefront, the chain's step between restarts, "
+                              "in units of the end's ellipse major half-axis "
+                              "(default 4)")
+    connect.add_argument("--lookahead-cone-deg", type=float, default=None,
+                         help="with --wavefront, the half-angle of the chain's "
+                              "look-ahead cone along the vessel axis (default 15); "
+                              "distinct from --cone-deg, the proposal cone")
+    connect.add_argument("--anisotropy-ratio", type=float, default=None,
+                         help="with --wavefront, the cap on how much dearer the "
+                              "dearest direction may be than the cheapest (default "
+                              "5, what a 26-neighbour lattice resolves)")
+    connect.add_argument("--stencil", type=int, choices=(26, 98), default=26,
+                         help="with --wavefront, the lattice neighbourhood of the "
+                              "propagation; 98 resolves finer angles at ~4x the cost")
+    connect.add_argument("--engine", choices=("auto", "lattice", "agd"), default="auto",
+                         help="with --wavefront, the eikonal solver: the built-in "
+                              "numba lattice, or the agd (HamiltonFastMarching) "
+                              "package if installed; auto prefers agd when present")
+    connect.add_argument("--explore-open-ends", action="store_true",
+                         help="with --wavefront, also chain outward from free ends "
+                              "nothing was proposed for, and propose to whatever "
+                              "vessel the front reaches")
+    connect.add_argument("--no-chain-fallback", action="store_true",
+                         help="with --wavefront, never fall back to keypoint chaining "
+                              "when the dual fronts fail")
+
     # ---- what Avizo invented rather than measured ---------------------------
     # Everything downstream reads the per-point field this writes, and nothing detects
     # on its own -- see `interpolation.py`'s docstring for why that is deliberate.
@@ -1232,16 +1283,18 @@ def cmd_connect(args) -> int:
         raise SystemExit("connect --cfc-model also needs --dpc")
     if args.cfc_model and args.dpc_learned:
         raise SystemExit("--cfc-model and --dpc-learned are mutually exclusive")
-    if args.geodesic and args.dpc:
+    if sum(bool(v) for v in (args.geodesic, args.dpc, args.wavefront)) > 1:
         raise SystemExit(
-            "--geodesic and --dpc are mutually exclusive: both decide the same "
-            "candidates, and running one over the other's topology would leave a "
-            "result neither of them chose"
+            "--geodesic, --dpc and --wavefront are mutually exclusive: each decides "
+            "the same candidates, and running one over another's topology would "
+            "leave a result none of them chose"
         )
+    if args.wavefront:
+        return cmd_connect_wavefront(args)
     if args.geodesic:
         return cmd_connect_geodesic(args)
     if args.out_seg:
-        raise SystemExit("--out-seg is only meaningful with --geodesic")
+        raise SystemExit("--out-seg is only meaningful with --geodesic or --wavefront")
 
     graph = _load(args.graph)
     print(f"  components before: {len(graph.components())}")
@@ -1354,15 +1407,149 @@ def cmd_connect_geodesic(args) -> int:
     with neither output path given, everything is proposed, searched and decided,
     and nothing is written.
     """
-    from .maskedit import MaskEdits, MaskSource
     from .reconnect import geodesic
-    from .reconnect.geodesic import audit
 
+    _require_paired_outputs(args, "--geodesic")
+    session = _reconnect_session(args)
+    params = geodesic.GeodesicParams(
+        alternatives=max(int(args.alternatives), 1),
+        max_unsupported_factor=float(args.max_unsupported_factor),
+        dark_lumen=not args.dpc_bright_lumen,
+        mask_endpoints=not args.no_mask_endpoints,
+    )
+    _apply_shared_params(args, params)
+    kw = _proposal_gate_kwargs(args)
+
+    def report(done, total, candidate):
+        print(f"    [{done}/{total}] {candidate!r}")
+
+    def lobe_report(done, total, found):
+        print(f"    free end {done}/{total}, {found} mask end(s) so far", end="\r")
+
+    if params.mask_endpoints:
+        print("\nsearching the mask for lumen no centreline describes...")
+    print("\nplanning:")
+    plan = geodesic.plan(
+        session.graph, session.index, session.frame, stack=session.stack,
+        params=params, same_component=args.same_component,
+        tjunction=not args.no_tjunction_geodesic, gate_kwargs=kw, progress=report,
+        lobe_progress=lobe_report,
+    )
+    print()
+    if plan.lobe_report is not None:
+        print(f"  {plan.lobe_report.describe()} "
+              f"({plan.lobe_report.seconds:.1f}s)")
+    print(plan.summarise())
+    return _finish_reconnect(args, session, plan, origin=geodesic.GEODESIC)
+
+
+def cmd_connect_wavefront(args) -> int:
+    """``connect --wavefront``: clean the graph, then route with a tensor and a wave.
+
+    The same contract as ``--geodesic`` -- paired outputs, dry run by default,
+    review and decisions files -- with the refinement report and the free-end
+    profiles printed first, because they are what every later decision rests on.
+    """
+    from .reconnect import geodesic, wavefront
+
+    _require_paired_outputs(args, "--wavefront")
+    if args.engine == "agd" and not wavefront.agd_available():
+        raise SystemExit(
+            "--engine agd needs the `agd` package (HamiltonFastMarching); install "
+            "it or use --engine lattice"
+        )
+    session = _reconnect_session(args)
+    params = wavefront.WavefrontParams(
+        alternatives=max(int(args.alternatives), 1),
+        dark_lumen=not args.dpc_bright_lumen,
+        mask_endpoints=not args.no_mask_endpoints,
+        refine_method=args.refine_method, refine_strength=float(args.refine_strength),
+        refine_workers=max(int(args.refine_workers), 1),
+        stencil=int(args.stencil), engine=args.engine,
+        explore_open_ends=bool(args.explore_open_ends),
+        chain_fallback=not args.no_chain_fallback,
+    )
+    # The shared flag keeps its own default for --geodesic; here the default is the
+    # package's larger one unless the operator said otherwise.
+    if args.max_unsupported_factor != 4.0:
+        params.max_unsupported_factor = float(args.max_unsupported_factor)
+    if args.reach_radii is not None:
+        params.reach_radii = float(args.reach_radii)
+    if args.keypoint_step is not None:
+        params.keypoint_step_major = float(args.keypoint_step)
+    if args.lookahead_cone_deg is not None:
+        params.lookahead_cone_deg = float(args.lookahead_cone_deg)
+    if args.anisotropy_ratio is not None:
+        params.anisotropy.max_ratio = float(args.anisotropy_ratio)
+    _apply_shared_params(args, params)
+    kw = _proposal_gate_kwargs(args)
+
+    def report(done, total, candidate):
+        print(f"    [{done}/{total}] {candidate!r}")
+
+    def lobe_report(done, total, found):
+        print(f"    free end {done}/{total}, {found} mask end(s) so far", end="\r")
+
+    def refine_report(row):
+        print(f"    iteration {row['iteration']}: max move {row['max_move_um']:.1f} um, "
+              f"{row['accepted_sections']} sections, {row['blocked_segments']} blocked",
+              end="\r")
+
+    def explore_report(done, total, node, reason):
+        print(f"    open end {done}/{total} (node {node}): {reason}")
+
+    if params.refine_method != "none":
+        print(f"\nrefining the centreline ({params.refine_method}, "
+              f"{params.refine_workers} worker(s))...")
+    plan = wavefront.plan(
+        session.graph, session.index, session.frame, session.labels,
+        stack=session.stack, params=params, same_component=args.same_component,
+        tjunction=not args.no_tjunction_geodesic, gate_kwargs=kw, progress=report,
+        lobe_progress=lobe_report, refine_progress=refine_report,
+        explore_progress=explore_report,
+    )
+    print()
+    profiles = plan.stats.get("end_profiles", {})
+    print(f"  {wavefront.prepare.summarise({}, plan.stats.get('refinement'))}")
+    print(f"  {profiles.get('profiled', 0)} free end(s) profiled, "
+          f"{profiles.get('with_section', 0)} with a measured section; engine "
+          f"{plan.stats.get('engine')}")
+    if plan.lobe_report is not None:
+        print(f"  {plan.lobe_report.describe()} "
+              f"({plan.lobe_report.seconds:.1f}s)")
+    if "exploration" in plan.stats:
+        ex = plan.stats["exploration"]
+        print(f"  explored {ex['explored']} open end(s): {ex['reached']} reached "
+              f"another vessel"
+              + (f"; stopped: {ex['stopped']}" if ex.get("stopped") else ""))
+    print(plan.summarise())
+    return _finish_reconnect(args, session, plan, origin=geodesic.WAVEFRONT)
+
+
+class _ReconnectSession:
+    """Everything a mask-and-graph repair needs open, built once for both connectors."""
+
+    def __init__(self, graph, split_records, labels, source, frame, stack, index):
+        self.graph = graph
+        self.split_records = split_records
+        self.labels = labels
+        self.source = source
+        self.frame = frame
+        self.stack = stack
+        self.index = index
+
+
+def _require_paired_outputs(args, flag: str) -> None:
     if bool(args.out) != bool(args.out_seg):
         raise SystemExit(
-            "connect --geodesic writes the graph and the mask together: pass both "
+            f"connect {flag} writes the graph and the mask together: pass both "
             "--out GRAPH.am and --out-seg SEG.am, or neither for a dry run"
         )
+
+
+def _reconnect_session(args) -> _ReconnectSession:
+    from .maskedit import MaskEdits, MaskSource
+    from .reconnect.geodesic import components as components_mod
 
     graph = _load(args.graph)
     print(f"  components before: {len(graph.components())}")
@@ -1383,16 +1570,13 @@ def cmd_connect_geodesic(args) -> int:
     def indexing(done, total):
         print(f"    plane {done}/{total}", end="\r")
 
-    index = geodesic.components.build(source, progress=indexing)
+    index = components_mod.build(source, progress=indexing)
     print(" " * 40, end="\r")
     print(f"  {index.describe()}")
+    return _ReconnectSession(graph, split_records, labels, source, frame, stack, index)
 
-    params = geodesic.GeodesicParams(
-        alternatives=max(int(args.alternatives), 1),
-        max_unsupported_factor=float(args.max_unsupported_factor),
-        dark_lumen=not args.dpc_bright_lumen,
-        mask_endpoints=not args.no_mask_endpoints,
-    )
+
+def _apply_shared_params(args, params) -> None:
     if args.describe_radii is not None:
         params.describe_radii = float(args.describe_radii)
     if args.min_lobe_voxels is not None:
@@ -1401,6 +1585,9 @@ def cmd_connect_geodesic(args) -> int:
         # One flag, both places: the proposal gate and the re-check on the route the
         # search actually returns.
         params.tortuosity_max = float(args.tortuosity)
+
+
+def _proposal_gate_kwargs(args) -> dict:
     kw = {}
     if args.cone_deg is not None:
         kw["cone_angle_deg"] = args.cone_deg
@@ -1410,27 +1597,15 @@ def cmd_connect_geodesic(args) -> int:
         kw["radius_ratio_max"] = args.radius_ratio
     if args.tortuosity is not None:
         kw["tortuosity_max"] = args.tortuosity
+    return kw
 
-    def report(done, total, candidate):
-        print(f"    [{done}/{total}] {candidate!r}")
 
-    def lobe_report(done, total, found):
-        print(f"    free end {done}/{total}, {found} mask end(s) so far", end="\r")
+def _finish_reconnect(args, session, plan, *, origin: int) -> int:
+    """Review rulings, dry run or apply, write the pair, record the decisions."""
+    from .reconnect import geodesic
+    from .reconnect.geodesic import audit
 
-    if params.mask_endpoints:
-        print("\nsearching the mask for lumen no centreline describes...")
-    print("\nplanning:")
-    plan = geodesic.plan(
-        graph, index, frame, stack=stack, params=params,
-        same_component=args.same_component,
-        tjunction=not args.no_tjunction_geodesic, gate_kwargs=kw, progress=report,
-        lobe_progress=lobe_report,
-    )
-    print()
-    if plan.lobe_report is not None:
-        print(f"  {plan.lobe_report.describe()} "
-              f"({plan.lobe_report.seconds:.1f}s)")
-    print(plan.summarise())
+    graph, source, frame = session.graph, session.source, session.frame
 
     # An operator's earlier rulings, if this run was given a decisions file that
     # already exists. Matched by endpoint rather than by position, so a re-run on
@@ -1459,14 +1634,15 @@ def cmd_connect_geodesic(args) -> int:
         applied = []
         print("\n(dry run: pass --out and --out-seg to write the result)")
     else:
-        applied = geodesic.apply_plan(graph, plan, source, frame, reviewed=approved)
+        applied = geodesic.apply_plan(graph, plan, source, frame, reviewed=approved,
+                                      origin=origin)
         print(f"\n{sum(1 for a in applied if a.ok)} repair(s) applied:")
         for result in applied:
             print(f"    {result.describe()}")
         print(f"\ncomponents now {len(graph.components())}")
         print(f"  edge provenance: {geodesic.origin_counts(graph)}")
 
-        _restore_interpolation(graph, split_records)
+        _restore_interpolation(graph, session.split_records)
         _save(graph, args.out, args.graph)
 
         print(f"\nwriting the repaired segmentation to {args.out_seg}...")

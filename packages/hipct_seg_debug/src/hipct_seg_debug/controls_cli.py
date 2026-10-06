@@ -137,8 +137,11 @@ def build_commands_panel(app, runner, specs):
             return
         argv = form.argv()
         values = form.values()
+        # The review and decisions files too, so a connector run hands its work
+        # list straight to the Reconnect tab. Not ``out_seg``: it is an ``.am`` and
+        # would be offered to the Data tab as if it were a graph.
         outputs = tuple(
-            str(values[dest]) for dest in ("out", "out_dir")
+            str(values[dest]) for dest in ("out", "out_dir", "review_json", "decisions_json")
             if values.get(dest) and form.spec.field(dest) is not None
         )
         runner.submit(Job(argv=argv, label=argv[0], outputs=outputs))

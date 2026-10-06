@@ -846,9 +846,10 @@ And one that fails silently instead, which is worse:
 ```
 src/hipct_seg_debug/     the package -- `pip install -e .` puts this on the import path
     edit/                skeleton and mask editing, reconnection, local surface regeneration
-    edit/reconnect/      the four reconnection proposers (gaps, CFC, DPC, geodesic)
+    edit/reconnect/      the five reconnection proposers (gaps, CFC, DPC, geodesic, wavefront)
 tests/                   the pytest suite; `python -m pytest` runs it
-docs/                    CLI.md, EDITOR.md, REFORMAT.md, SKELETONISATION.md, GEODESIC_RECONNECTION.md
+docs/                    CLI.md, EDITOR.md, REFORMAT.md, SKELETONISATION.md, GEODESIC_RECONNECTION.md,
+                         WAVEFRONT_RECONNECTION.md
 environment-cfc.yml      the separate Python 3.9 environment the Cascade Forest steps need
 ```
 

@@ -37,7 +37,7 @@ run follows, so the default is to print what would happen and write nothing.
 |---|---|---|
 | `report` | prints; there is no output flag | — |
 | `gaps` `connect` `flag-interpolation` `skeletonise` `optimise` `repair-radius` `repair-mask` | prints a plan, writes nothing | `--out PATH` |
-| `connect --geodesic` | prints a plan, writes nothing | `--out PATH` **and** `--out-seg PATH`, together |
+| `connect --geodesic` / `connect --wavefront` | prints a plan, writes nothing | `--out PATH` **and** `--out-seg PATH`, together |
 | `skeletonise-all` | **always writes** to `--out-dir` (default `skeletons/`) | `--out-dir DIR` |
 | `train-cfc` | refuses a non-empty artifact directory | `--out-model DIR` (required) |
 | `export-dpc-regions` | refuses to run | `--output DIR` (required) |
@@ -85,6 +85,7 @@ rejected the command line. `--validate-only` exits `1` on a failed check unless
 | train the scan-specific CFC on every skeleton voxel | `edit train-cfc GRAPH.am --seg SEG.am --raw RAW --out-model MODEL` in Python 3.9 |
 | reconnect with CFC-guided DPC | `edit connect GRAPH.am --tjunction --dpc --raw RAW --seg SEG.am --cfc-model MODEL --out fixed.am` |
 | repair graph *and* mask together | `edit connect GRAPH.am --geodesic --seg SEG.am --raw RAW --out fixed.am --out-seg fixed-seg.am` |
+| bridge long gaps in collapsed vessels (refines the centreline first) | `edit connect GRAPH.am --wavefront --seg SEG.am --raw RAW --refine-workers 8 --out fixed.am --out-seg fixed-seg.am` |
 | export the nine blinded DPC review cases | `edit export-dpc-regions GRAPH.am --seg SEG.am --raw RAW --output REVIEW_DIR` |
 | sweep global `omega=0..7` and run ablations | `edit evaluate-dpc GRAPH.am --seg SEG.am --raw RAW --cfc-model MODEL --omega 0:7` |
 | restore collapsed radii | `edit repair-radius GRAPH.am --source both --out fixed.am` |
@@ -457,9 +458,20 @@ python -m hipct_seg_debug.edit connect GRAPH.am --tjunction --out fixed.am
 | `--out-seg PATH` | — | write the repaired segmentation; **required** whenever `--geodesic` is given `--out` |
 | `--review-json PATH` | — | write the candidates needing a human decision |
 | `--decisions-json PATH` | — | write the full record; if it exists, operator rulings in it are applied first |
-| `--max-unsupported-factor N` | 4 | reject a route with more than N local radii of contiguous unsupported path |
+| `--max-unsupported-factor N` | 4 (8 with `--wavefront`) | reject a route with more than N local radii of contiguous unsupported path |
 | `--alternatives N` | 3 | how many distinct routes to look for; the second decides ambiguity |
 | `--no-tjunction-geodesic` | off | with `--geodesic`, propose end-to-end joins only |
+| `--wavefront --seg PATH [--raw DIR]` | off | tensor-guided wavefront connector for long gaps; cleans the graph first, repairs the mask too (exclusive with `--geodesic` and `--dpc`) |
+| `--refine-method {none,centroid-spline,centroid-coherent,laplacian,taubin}` | `centroid-coherent` | with `--wavefront`, the whole-graph centreline refinement run before anything is proposed |
+| `--refine-strength N` / `--refine-workers N` | 0.1 / 1 | refinement smoothing strength and threads (also used for the radius remeasurement) |
+| `--reach-radii N` | 40 | with `--wavefront`, how far a free end may look for a partner, in endpoint radii |
+| `--keypoint-step N` | 4 | with `--wavefront`, the chain's step between front restarts, in ellipse major half-axes |
+| `--lookahead-cone-deg N` | 15 | with `--wavefront`, the half-angle of the chain's look-ahead cone along the vessel axis (not the proposal cone) |
+| `--anisotropy-ratio N` | 5 | with `--wavefront`, the cap on how much dearer the dearest direction is than the cheapest |
+| `--stencil {26,98}` | 26 | with `--wavefront`, the lattice neighbourhood; 98 resolves finer angles at ~4x the cost |
+| `--engine {auto,lattice,agd}` | `auto` | with `--wavefront`, the eikonal solver; `agd` needs the optional `agd` package |
+| `--explore-open-ends` | off | with `--wavefront`, also chain outward from free ends nothing was proposed for |
+| `--no-chain-fallback` | off | with `--wavefront`, never fall back to keypoint chaining when the dual fronts fail |
 
 Loosening `--cone-deg` and `--reach-factor` is the usual way to get candidates out
 of a graph that yields none. **Use `--show-rejected` first** — it names the gate
@@ -499,7 +511,7 @@ Opt-in and mutually exclusive with `--dpc`. Four things behave differently:
    an endpoint that does not sit on the mask, and — without `--raw` — any mask gap
    wider than two segmentation voxels.
 4. **Provenance is written.** Every created edge carries `ReconnectionOrigin`
-   (0 original, 1 geometry, 2 DPC, 3 geodesic, 4 re-skeletonised), `RouteScore`
+   (0 original, 1 geometry, 2 DPC, 3 geodesic, 4 re-skeletonised, 5 wavefront), `RouteScore`
    and `RouteReviewed`, and they survive the `.am` round trip.
 
 Dry run is still the default: with neither output path, everything is proposed,
@@ -521,6 +533,43 @@ One case cannot be helped: where the fill was an entire edge between two junctio
 removing it leaves both at degree two rather than degree one, and every proposer here
 starts from a free end. The split is still reported, and the component count still
 tells you the tree was never whole.
+
+#### `--wavefront` — long gaps in collapsed vessels
+
+```
+python -m hipct_seg_debug.edit connect GRAPH.am --wavefront `
+  --seg SEG.am --raw RAW\ --refine-workers 8 `
+  --out fixed.am --out-seg fixed-seg.am `
+  --review-json review.json --decisions-json decisions.json
+```
+
+The same contract as `--geodesic` — paired outputs, dry run by default, the same
+review loop, the same `ReconnectionOrigin` column (5 wavefront) — with three
+differences in what happens before and inside the search. See
+[WAVEFRONT_RECONNECTION.md](WAVEFRONT_RECONNECTION.md).
+
+1. **The graph is refined first.** `refine-centreline` runs over the whole graph
+   (`--refine-method`, `--refine-workers`), radii are remeasured, and each free end
+   is profiled against the segmentation — a fitted tangent and the principal axes
+   of its collapsed cross-section. On a jittered skeleton the two-point tangent the
+   other proposers use is off by tens of degrees; after refinement it is under one.
+   The written graph carries the refined geometry and a `centreline_displacement_um`
+   point field. `--refine-method none` skips it for a graph already refined.
+2. **The cost has a direction.** The corridor is priced as for `--geodesic`, then
+   given a structure-tensor orientation and a Hessian planarity, so a step along
+   the vessel is cheap, across the ribbon dearer, and through the collapsed wall
+   dearest (`--anisotropy-ratio`). Routes that run against that orientation are
+   refused on `alignment` / `normal_crossing`, reported in the evidence.
+3. **The search is a wave.** Two fronts are swept from the ends and joined at the
+   cheapest meeting point; when that fails, the front is marched keypoint by
+   keypoint with a look-ahead cone (`--keypoint-step`, `--lookahead-cone-deg`) and
+   a forced bridge across a dropout is recorded and sent to review. The proposal
+   reach is 40 radii rather than 15 (`--reach-radii`), and `--explore-open-ends`
+   chains outward from free ends nothing was proposed for.
+
+`--engine auto` uses the built-in numba lattice solver unless the optional `agd`
+package (`pip install "hipct_seg_debug[eikonal]"`) is importable; `--engine agd`
+without it is refused with that message.
 
 With `--dpc`, endpoint candidates are explicitly routed through Type 1 then Type 2,
 and `--tjunction` adds Type 3. Accepted bridges are applied between stages so every

@@ -24,7 +24,7 @@ from .candidates import (
     TORTUOSITY_MAX,
     Bridge,
     _new_stats,
-    endpoint_tangent,
+    tangent_for,
     gate_geometry,
     hermite_path,
     resample_by_arclength,
@@ -50,6 +50,7 @@ def propose(
     stats: dict | None = None,
     backbone_nodes: set[int] | None = None,
     target_backbone_only: bool = False,
+    tangents: dict | None = None,
 ) -> list[Bridge]:
     """Propose bridges from free ends onto the interior of other segments.
 
@@ -59,7 +60,9 @@ def propose(
 
     `stats` is filled as in :func:`~.endpoints.propose`, and for the same reason:
     the two prunes here -- the free end's own vessel, and the same-component test --
-    both fire before a :class:`Bridge` exists.
+    both fire before a :class:`Bridge` exists. `tangents` is also as there: a
+    caller-measured ``{node: (direction, radius_um)}`` that overrides the two-point
+    estimate.
     """
     from scipy.spatial import cKDTree
 
@@ -91,10 +94,10 @@ def propose(
 
     out: list[Bridge] = []
     reaches: list[float] = []
-    for source in sorted(ends, key=lambda n: -_radius_at(graph, n)):
+    for source in sorted(ends, key=lambda n: -_radius_at(graph, n, tangents)):
         if target_backbone_only and source in backbone_nodes:
             continue
-        tangent = endpoint_tangent(graph, source)
+        tangent = tangent_for(graph, source, tangents)
         if tangent is None:
             counts["ends_without_tangent"] += 1
             continue
@@ -204,8 +207,8 @@ def _approach_direction(graph, sid: int, index: int, p0: np.ndarray, p1: np.ndar
     return perpendicular / n
 
 
-def _radius_at(graph, node: int) -> float:
-    info = endpoint_tangent(graph, node)
+def _radius_at(graph, node: int, tangents=None) -> float:
+    info = tangent_for(graph, node, tangents)
     return info[1] if info is not None else 0.0
 
 

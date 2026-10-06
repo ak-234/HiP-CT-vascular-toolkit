@@ -79,6 +79,10 @@ ORDERS = (
     (5, "quintic (5)"),
 )
 
+#: Upper limit of the sharpen spinbox. Past about 2 the overshoot dominates the edge;
+#: 5 leaves room to see that happen.
+SHARPEN_MAX = 5.0
+
 
 def build_reformat_panel(app):
     """Return the Reformat widget for a `ViewerApp`. Docking is the caller's business."""
@@ -180,6 +184,41 @@ def build_reformat_panel(app):
     )
     order_row.addWidget(match_button)
     lay.addLayout(order_row)
+
+    # Anti-alias is a correctness setting and stays on; the toggle exists so the beat
+    # pattern it removes can be seen. Sharpen changes the values and starts at 0.
+    filter_row = QHBoxLayout()
+    anti_alias = QCheckBox("low-pass before under-sampling")
+    anti_alias.setChecked(True)
+    anti_alias.setToolTip(
+        "Where a plane's pixel is coarser than the raw voxel, blur the raw block with "
+        "a Gaussian sized to the ratio before interpolating, so fine texture does not "
+        "alias into a beat pattern. Does nothing at one voxel per pixel or finer. Off "
+        "is for comparison, not for use."
+    )
+    filter_row.addWidget(anti_alias, 1)
+    filter_row.addWidget(QLabel("sharpen"))
+    sharpen = QDoubleSpinBox()
+    sharpen.setRange(0.0, SHARPEN_MAX)
+    sharpen.setSingleStep(0.25)
+    sharpen.setDecimals(2)
+    sharpen.setValue(reformat_mod.DEFAULT_SHARPEN)
+    sharpen.setToolTip(
+        "0 = off. Unsharp mask applied to the sampled planes: amount times the "
+        "difference from a Gaussian blur. Cosmetic -- it steepens edges but cannot "
+        "recover detail the acquisition lacks, and it overshoots either side of a real "
+        "edge. Recorded in the notes so an export says so."
+    )
+    filter_row.addWidget(sharpen)
+    filter_row.addWidget(QLabel("sigma px"))
+    sharpen_sigma = QDoubleSpinBox()
+    sharpen_sigma.setRange(0.3, 5.0)
+    sharpen_sigma.setSingleStep(0.1)
+    sharpen_sigma.setDecimals(1)
+    sharpen_sigma.setValue(reformat_mod.DEFAULT_SHARPEN_SIGMA_PX)
+    sharpen_sigma.setToolTip("Blur width of the unsharp mask, in output pixels.")
+    filter_row.addWidget(sharpen_sigma)
+    lay.addLayout(filter_row)
 
     radii_row = QHBoxLayout()
     radii_row.addWidget(QLabel("half-width (radii)"))
@@ -402,6 +441,9 @@ def build_reformat_panel(app):
             "max_smooth_iters": int(passes.value()),
             "smooth_window_um": float(smooth_um.value()) or None,
             "order": int(order.currentData()),
+            "anti_alias": bool(anti_alias.isChecked()),
+            "sharpen": float(sharpen.value()),
+            "sharpen_sigma_px": float(sharpen_sigma.value()),
         }
 
     # Every slot below funnels its failure into the summary label. PyQt5 calls qFatal on
@@ -872,6 +914,7 @@ def build_reformat_panel(app):
         "safety": safety, "passes": passes, "smooth_um": smooth_um,
         "with_mask": with_mask, "with_sections": with_sections,
         "order": order, "match": match_button,
+        "anti_alias": anti_alias, "sharpen": sharpen, "sharpen_sigma": sharpen_sigma,
         "save_name": save_name, "save_format": save_format, "save_hint": save_hint,
         "save": save_button, "load": load_button,
         "add": add_button, "clear": clear_button,
@@ -923,9 +966,13 @@ def _half_of(opts, voxel_um=0.0):
 
 
 def _default_step(app) -> float:
-    """One raw voxel: below that the reformat is inventing detail."""
+    """One raw voxel: below that the reformat is inventing detail.
+
+    Goes through :func:`reformat.isotropic_voxel_um`, so an anisotropic voxel is
+    refused here -- in the summary label, via ``guarded`` -- before a build is tried.
+    """
     frame = getattr(getattr(app, "session", None), "frame", None)
-    return float(np.min(frame.raw_voxel)) if frame is not None else 1.0
+    return reformat_mod.isotropic_voxel_um(frame) if frame is not None else 1.0
 
 
 def _open_viewer(app, result, say, *, sections_in_3d: bool = False,
