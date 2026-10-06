@@ -376,6 +376,10 @@ def build_parser() -> argparse.ArgumentParser:
                              help="generate the lumen surface for a graph")
     surface.add_argument("--out-dir", default="surface", help="where to write the STL")
     surface.add_argument("--voxel-mm", type=float, default=None)
+    surface.add_argument("--prepared-report", default=None,
+                         help="reconstruct a prepared graph directly, verifying its report/hash")
+    surface.add_argument("--cells-across-diameter", type=float, default=12.)
+    surface.add_argument("--maximum-cells", type=int, default=5_000_000)
     surface.add_argument("--keep-interpolation", action="store_true",
                          help="mesh Avizo's interpolated fills too; by default they are "
                               "cut out, because a capsule swept along an invented "
@@ -448,7 +452,20 @@ def build_parser() -> argparse.ArgumentParser:
     skel_all.add_argument("--out-dir", default="skeletons",
                           help="where to write every candidate .am")
     skel_all.add_argument("--algorithms", default="lee",
-                          help="comma-separated: lee, teasar, amira")
+                          help="comma-separated: lee, teasar, amira, jin-mcp, jin-mcp-centroid, vmtk")
+    skel_all.add_argument("--jin-max-voxels", type=int, default=2_000_000,
+                          help="Jin MCP maximum ROI voxel count (default 2000000)")
+    skel_all.add_argument("--jin-root-zyx", type=int, nargs=3, default=None,
+                          help="Jin extraction root in decoded ROI voxels; single component only")
+    skel_all.add_argument("--jin-refine-iterations", type=int, default=5,
+                          help="centroid fitting iterations for the Jin hybrid")
+    skel_all.add_argument("--vmtk-source-xyz", type=float, nargs=3, action='append', default=None,
+                          help="VMTK source seed in world micrometres (repeatable)")
+    skel_all.add_argument("--vmtk-target-xyz", type=float, nargs=3, action='append', default=None,
+                          help="VMTK target seed in world micrometres (repeatable)")
+    skel_all.add_argument("--roi-zyx", type=int, nargs=6, default=None,
+                          metavar=("Z0", "Z1", "Y0", "Y1", "X0", "X1"),
+                          help="decode only this source-voxel region (exclusive upper bounds; stride 1)")
     skel_all.add_argument("--amira-graph", default=None,
                           help="existing Avizo .am to score as the 'amira' candidate")
     skel_all.add_argument("--teasar-scale", type=float, default=None,
@@ -580,6 +597,9 @@ def build_parser() -> argparse.ArgumentParser:
                            "digitised perimeter over-states a tiny section -- is "
                            "measurably wrong: it under-states one. See "
                            "--no-perimeter-correction")
+    radp.add_argument("--section-filter", action="store_true",
+                      help="use the shared finite-volume and slab ownership filter; "
+                           "keep authored junction profiles out of measurements")
     radp.add_argument("--junction-mask-max-fraction", type=float, default=None,
                       help="most of a segment's own length one junction may consume, "
                            "per end (default 0.4, so a fifth of every segment stays "
@@ -1774,6 +1794,9 @@ def _train_probability(graph, rois):
 
 
 def cmd_surface(args) -> int:
+    if getattr(args, 'prepared_report', None):
+        from .prepared_surface import run
+        return run(args)
     from .sdfpatch import SdfSession
 
     graph = _load(args.graph)
@@ -2144,10 +2167,32 @@ def _decoded(args):
     decoded_bytes = math.prod(int(n) for n in sampled_shape)
     origin_zyx = (0, 0, 0)
 
+    roi = getattr(args, "roi_zyx", None)
+    requested = {n.strip() for n in getattr(args, 'algorithms', '').split(',')}
+    bounded = bool(requested & {'jin-mcp', 'jin-mcp-centroid', 'vmtk'})
+    limit = min(getattr(args, 'jin_max_voxels', 2_000_000), 2_000_000) if 'vmtk' in requested else getattr(args, 'jin_max_voxels', 2_000_000)
+    if roi is None and bounded and decoded_bytes > limit:
+        raise ValueError('Experimental skeleton input exceeds voxel limit; specify --roi-zyx before decoding')
+    if roi is not None:
+        bounds = np.asarray(roi, dtype=np.int64).reshape(3, 2)
+        extent = bounds[:, 1] - bounds[:, 0]
+        if stride != 1 or np.any(bounds[:, 0] < 0) or np.any(extent <= 0) or np.any(bounds[:, 1] > sampled_shape):
+            raise ValueError('--roi-zyx requires valid source bounds and --stride 1')
+        if bounded and math.prod(map(int, extent)) > limit:
+            raise ValueError('ROI exceeds --jin-max-voxels; reduce its bounds before decoding')
+        origin_zyx = tuple(map(int, bounds[:, 0]))
+        z0, z1, y0, y1, x0, x1 = map(int, roi)
+        volume = np.empty(tuple(extent), dtype=np.uint8)
+        reader = getattr(labels, 'slice_window', None)
+        for i, z in enumerate(range(z0, z1)):
+            volume[i] = (reader(z, y0, y1, x0, x1) if reader is not None
+                         else labels.slice_z(z)[y0:y1, x0:x1])
+        print(f'ROI {roi}: cut boundaries are artificial; assess them separately')
+
     # Dense topology/scoring operations create several arrays per voxel.  Above this
     # size, decoding the all-zero exterior first is both dangerous and pointless.
     # Cropping changes neither foreground nor world coordinates.
-    if decoded_bytes > 8 * (1 << 30):
+    elif decoded_bytes > 8 * (1 << 30):
         print(
             f"{Path(path).name}: foreground scan before decoding "
             f"{decoded_bytes / 1e9:.2f} GB (stride {stride})..."
@@ -2243,6 +2288,21 @@ def cmd_skeletonise_all(args) -> int:
         image, refs = _scoring_context(args, volume, frame)
 
     params: dict[str, dict] = {n: {} for n in names}
+    for name in ('jin-mcp', 'jin-mcp-centroid'):
+        if name not in params:
+            continue
+        params[name]["max_voxels"] = args.jin_max_voxels
+        params[name]["report_dir"] = str(Path(args.out_dir) / f"{name}-reports")
+        if name == 'jin-mcp-centroid':
+            params[name]['refine_iterations'] = args.jin_refine_iterations
+        if args.jin_root_zyx is not None:
+            if args.per_tree:
+                raise ValueError('--jin-root-zyx is relative to one ROI; cannot combine with --per-tree')
+            params[name]["root_zyx"] = args.jin_root_zyx
+    if 'vmtk' in params:
+        if args.per_tree:
+            raise ValueError('VMTK baseline requires a single connected ROI and matching explicit seeds')
+        params['vmtk'].update(source_points=args.vmtk_source_xyz, target_points=args.vmtk_target_xyz)
     if "teasar" in params:
         if args.teasar_scale is not None:
             params["teasar"]["scale"] = args.teasar_scale
@@ -2646,6 +2706,7 @@ def cmd_radius_perimeter(args) -> int:
         graph, frame, labels, max_half=args.max_half,
         max_radius_factor=args.max_radius_factor,
         branch_aware=args.branch_aware,
+        section_filter=args.section_filter,
         root_edges=root_edges,
         tangent_search_degrees=args.tangent_search_deg,
         **({} if args.transverse_axis_ratio is None

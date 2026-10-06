@@ -1,5 +1,8 @@
 # Skeletonisation: algorithms, the super metric, and what this repo does with them
 
+For the experimental Jin et al. minimum-cost-path backend, regional commands,
+tests and the known flattened-lumen limitation, see [JIN_MCP.md](JIN_MCP.md).
+
 The methodology of
 
 > C.L. Walsh, M. Berg, H. West, N.A. Holroyd, S. Walker-Samuel, R.J. Shipley,
