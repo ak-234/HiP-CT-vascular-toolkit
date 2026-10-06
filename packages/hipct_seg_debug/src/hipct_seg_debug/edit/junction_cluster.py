@@ -5,6 +5,9 @@ import numpy as np
 from scipy import sparse
 from scipy.sparse.linalg import spsolve
 
+#: Re-solves after pinning vertices whose edges would newly leave the segmentation.
+PIN_ROUNDS = 4
+
 
 def neighbourhood_clusters(graph, nodes, observations, scales, spacing):
     """Merge overlapping incident spans before fitting; schedule by node ID."""
@@ -159,51 +162,133 @@ def fit_cluster(graph, nodes, spans, observations, scales, sampler, frame, stren
                     strength*calibre**3)
     design = sparse.coo_matrix((values, (rows, cols)), shape=(len(targets), len(initial))).tocsr()
     target = np.asarray(targets)
-    fixed = np.array(sorted(fixed), dtype=int)
-    free = np.setdiff1d(np.arange(len(initial)), fixed)
-    if not len(free):
-        return dict(report, status='stationary', max_move_um=0.)
-    matrix = design[:, free]
-    rhs = target-design[:, fixed]@initial[fixed]
-    h, b = matrix.T@matrix, matrix.T@rhs
-    proposed = initial.copy()
     c = sparse.lil_matrix((len(constraints), len(initial)))
     for row, equation in enumerate(constraints):
         for col, value in equation.items():
             c[row, col] = value
     c = c.tocsr()
-    if len(constraints):
-        cf = c[:, free]
-        system = sparse.bmat([[h, cf.T], [cf, None]], format='csc')
-        solution = spsolve(system, np.vstack([b, -c[:, fixed]@initial[fixed]]))
-        proposed[free] = solution[:len(free)]
-    else:
-        proposed[free] = spsolve(h.tocsc(), b)
     def objective(x):
         # Include the degree-two kink in the acceptance objective when the input
         # violates its new equality constraint. Its physical weight is local.
         return float(np.sum((design@x-target)**2)+sp**3*np.sum((c@x)**2))
     before = objective(initial)
-    alpha = 1.
-    while alpha >= 1/256:
-        trial = initial+alpha*(proposed-initial)
-        candidate = {sid: x.copy() for sid, x in old.items()}
-        for sid, (lo, hi) in spans.items():
-            candidate[sid][lo:hi+1] = trial[indices[sid]]
-        after = objective(trial)
-        reasons = {sid: reason for sid in spans
-                   if (reason := movement_rejection(old[sid], candidate[sid], sampler, frame,
-                                                    original_bad=original_bad[sid]))}
-        uphill = not np.isfinite(after) or after > before+1e-9*max(1., before)
-        if not uphill and not reasons:
+    owner = {col: key for key, col in keys.items()}
+    base, pinned = set(fixed), set()
+    best = None
+    # Active set: a polyline that already grazes the boundary leaves it under any
+    # step, however small. Pin the vertices of each new exit where they are (their
+    # edges are contained there) and solve again, instead of letting one grazing
+    # edge veto the whole neighbourhood. Every pinned vertex is reported.
+    #
+    # Pin also when the line search succeeds only partway. Otherwise a fit whose
+    # contained optimum is ~80 um away creeps by 1/16..1/128 of it per iteration and
+    # looks stationary, then jumps once a full failure finally triggers pinning
+    # (segment 2699 on region 318). Every contained attempt is kept and the lowest
+    # objective wins, so pinning can only improve on the partial step.
+    for attempt in range(PIN_ROUNDS+1):
+        fixed = np.array(sorted(base | pinned), dtype=int)
+        free = np.setdiff1d(np.arange(len(initial)), fixed)
+        if not len(free):
+            return dict(report, status='stationary', max_move_um=0., **_pins(pinned, owner, lookup))
+        matrix = design[:, free]
+        rhs = target-design[:, fixed]@initial[fixed]
+        h, b = matrix.T@matrix, matrix.T@rhs
+        proposed = initial.copy()
+        if len(constraints):
+            cf = c[:, free]
+            system = sparse.bmat([[h, cf.T], [cf, None]], format='csc')
+            solution = spsolve(system, np.vstack([b, -c[:, fixed]@initial[fixed]]))
+            proposed[free] = solution[:len(free)]
+        else:
+            proposed[free] = spsolve(h.tocsc(), b)
+        alpha = 1.
+        tried = []
+        full = None
+        while alpha >= 1/256:
+            trial = initial+alpha*(proposed-initial)
+            candidate = {sid: x.copy() for sid, x in old.items()}
+            for sid, (lo, hi) in spans.items():
+                candidate[sid][lo:hi+1] = trial[indices[sid]]
+            after = objective(trial)
+            reasons = {sid: reason for sid in spans
+                       if (reason := movement_rejection(old[sid], candidate[sid], sampler, frame,
+                                                        original_bad=original_bad[sid]))}
+            tried.append((alpha, set(reasons)))
+            uphill = not np.isfinite(after) or after > before+1e-9*max(1., before)
+            if full is None:
+                full = candidate, reasons, uphill
+            if not uphill and not reasons:
+                break
+            alpha /= 2
+        if alpha >= 1/256:
+            if best is None or after < best['after']:
+                best = dict(after=after, trial=trial, candidate=candidate, alpha=alpha,
+                            pinned=set(pinned))
+            if alpha == 1.:
+                break
+            # A partial step: pin what exits at the full step and try for more.
+            candidate, reasons, uphill = full
+        if (attempt == PIN_ROUNDS or uphill
+                or set(reasons.values()) != {'new_segmentation_exit'}):
             break
-        alpha /= 2
-    if alpha < 1/256:
+        extra = set()
+        for sid in reasons:
+            lo, hi = spans[sid]
+            for e in np.flatnonzero(bad_edges(candidate[sid], sampler, frame) & ~original_bad[sid]):
+                extra.update(lookup[sid, i] for i in range(e-1, e+3) if lo <= i <= hi)
+        extra -= base | pinned
+        if not extra:
+            break
+        pinned |= extra
+    if best is not None:
+        trial, candidate, alpha, after = best['trial'], best['candidate'], best['alpha'], best['after']
+        pinned = best['pinned']
+    if best is None:
         return dict(report, status='blocked', objective_before=before,
                     objective_after=after, objective_increase=bool(uphill),
-                    blocked_reasons=reasons)
+                    blocked_reasons=reasons,
+                    blocked_detail={sid: _block_detail(graph, sid, nodes, spans[sid], old[sid],
+                                                       candidate[sid], original_bad[sid],
+                                                       observations, tried, sampler, frame)
+                                    for sid in sorted(reasons)},
+                    **_pins(pinned, owner, lookup))
     peak = float(np.linalg.norm(trial-initial, axis=1).max())
     for sid in sorted(spans):
         graph.set_segment_coords(sid, candidate[sid])
     return dict(report, status='stationary' if peak < .1*sp else 'moving',
-                max_move_um=peak, step=alpha, objective_before=before, objective_after=after)
+                max_move_um=peak, step=alpha, objective_before=before, objective_after=after,
+                **_pins(pinned, owner, lookup))
+
+
+def _pins(pinned, owner, lookup):
+    """Report pinned vertices per segment, and any pinned junction node, explicitly."""
+    if not pinned:
+        return {}
+    points = {}
+    for (sid, i), col in lookup.items():
+        if col in pinned:
+            points.setdefault(int(sid), []).append(int(i))
+    return dict(pinned_points={sid: sorted(v) for sid, v in sorted(points.items())},
+                pinned_nodes=sorted(int(owner[col][1]) for col in pinned if owner[col][0] == 'node'))
+
+
+def _block_detail(graph, sid, nodes, span, old, new, original_bad, observations, tried,
+                  sampler, frame):
+    """Where and how early one segment vetoes a neighbourhood step.
+
+    ``contained_alpha`` is the largest tried step at which this segment alone had no
+    objection; ``None`` means even 1/256 of the step fails, i.e. the current polyline
+    already touches the boundary where it would move. Exit edges within two edges of a
+    jointly moved node point at the node shift rather than the segment's own fit.
+    """
+    from .centreline_refine import bad_edges
+    exits = np.flatnonzero(bad_edges(new, sampler, frame) & ~original_bad)
+    seg = graph.segment(sid)
+    moved_ends = [i for i, key in ((0, 'node1'), (len(old)-2, 'node2')) if seg[key] in nodes]
+    return dict(
+        exit_edges=exits.tolist(),
+        exit_near_moved_node=bool(any(abs(int(e)-end) <= 2 for e in exits for end in moved_ends)),
+        contained_alpha=max((a for a, blocked in tried if sid not in blocked), default=None),
+        released_span=[int(span[0]), int(span[1])], n_points=len(old),
+        accepted_sections=len(observations[sid][2]),
+        max_move_um=float(np.linalg.norm(new-old, axis=1).max()))

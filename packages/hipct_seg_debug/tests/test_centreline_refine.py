@@ -297,3 +297,81 @@ def test_invalid_settings_are_refused(kw):
     g, frame, mask = offset_slit()
     with pytest.raises(ValueError):
         cr.refine(g, frame, mask, **kw)
+
+
+def test_support_is_compared_by_site_not_point_index():
+    # The same two places accepted, landing on different point indices after a move.
+    assert cr._support_signature([10, 20], [0, 10, 20, 30]) == cr._support_signature(
+        [11, 21], [0, 11, 21, 30])
+    assert cr._support_signature([10], [0, 10, 20, 30]) != cr._support_signature(
+        [20], [0, 10, 20, 30])
+
+
+def test_held_site_keeps_its_result_until_it_moves_a_voxel():
+    x = np.c_[np.arange(10.)*10, np.zeros(10), np.zeros(10)]
+    sites, memory = np.array([0, 5, 9]), {}
+    target = x.copy()
+    target[5, 1] = 3.
+    weights = np.zeros(10)
+    weights[5] = .8
+    first, held, fresh = cr._hold_sections(7, x, (target, weights, [5], [40.]), sites, memory, 10.)
+    assert (held, fresh) == (0, 3) and first[2] == [5]
+    # Next iteration: site 5 moved 4 um (< 10) and is now rejected; the old result stands.
+    moved = x + [0., 4., 0.]
+    obs, held, fresh = cr._hold_sections(7, moved, (moved.copy(), np.zeros(10), [], []),
+                                         sites, memory, 10.)
+    assert (held, fresh) == (3, 0) and obs[2] == [5] and obs[3] == [40.]
+    np.testing.assert_array_equal(obs[0][5], target[5])
+    assert obs[1][5] == .8
+    # The curve slid 6 um along itself: the site's index now lands on point 4's
+    # neighbour side, but the held target stays on the point nearest its anchor.
+    slid = x + [6., 0., 0.]
+    obs, held, fresh = cr._hold_sections(7, slid, (slid.copy(), np.zeros(10), [], []),
+                                         sites, memory, 10.)
+    assert obs[2] == [4] and obs[1][4] == .8 and obs[1][5] == 0.
+    np.testing.assert_array_equal(obs[0][4], target[5])
+    assert cr._support_signature(obs[2], sites) == cr._support_signature([5], sites)
+    # Moved 12 um from where it was measured: re-measured, and the rejection counts.
+    far = x + [0., 12., 0.]
+    obs, held, fresh = cr._hold_sections(7, far, (far.copy(), np.zeros(10), [], []),
+                                         sites, memory, 10.)
+    assert fresh == 3 and obs[2] == []
+
+
+@pytest.mark.parametrize('hold', [0., 1.])
+def test_flip_flopping_section_on_a_still_curve_changes_support_only_without_hold(
+        monkeypatch, hold):
+    g, frame, mask = offset_slit()
+    g.set_segment_coords(0, g.coords(0) - [0., 90., 0.])  # already centred: nothing to fit
+    calls = []
+    def sections(graph, sid, frame, sampler, ctx, scale, max_half, max_samples, *a, **k):
+        x = graph.coords(sid)
+        sites = cr._section_sites(x, max_samples)
+        good = [int(i) for i in sites[1:-1]]
+        if len(calls) % 2:
+            good = good[1:]  # the second site is rejected every other iteration
+        calls.append(1)
+        weights = np.zeros(len(x))
+        weights[good] = 1.
+        return x.copy(), weights, good, [15.]*len(good)
+    monkeypatch.setattr(cr, '_targets', sections)
+    report = cr.refine(g, frame, mask, method='centroid-spline', max_iterations=5,
+                       max_samples=8, section_hold_voxels=hold)
+    changes = [h['changed_support_segments'] for h in report.history]
+    if hold:
+        assert changes == [0]*len(changes)
+        assert report.history[-1]['held_sections'] > 0
+    else:
+        assert sum(changes) > 0
+
+
+def test_shape_change_ignores_sliding_but_sees_real_movement():
+    line = np.c_[np.linspace(0., 100., 11), np.zeros(11), np.zeros(11)]
+    slid = line.copy()
+    slid[1:-1, 0] += 4.  # interior points re-spaced along the same straight curve
+    assert cr._shape_change(line, slid) < 1e-9
+    assert np.linalg.norm(slid-line, axis=1).max() == pytest.approx(4.)
+    assert cr._shape_change(line, line+[0., 3., 0.]) == pytest.approx(3.)
+    shorter = line.copy()
+    shorter[-1, 0] = 80.  # an end pulled back along the curve; point 9 still reaches 90
+    assert cr._shape_change(line, shorter) == pytest.approx(10.)

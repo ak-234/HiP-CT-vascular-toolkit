@@ -1016,6 +1016,11 @@ For segmentation-constrained geometry fitting without pruning or de-looping, use
 circular-vessel collisions using smooth displacement fields and fixed measured
 radii. Both commands write diagnostic reports and remain opt-in; see
 [CENTRELINE_REFINEMENT.md](CENTRELINE_REFINEMENT.md) for the workflow and limits.
+`simplify-skeleton` removes short leaves and leaves lying inside another vessel's
+lumen, and collapses short inner links that split one junction into several, before
+`dfs-centroid` fitting. It is a dry run unless `--apply` is given, and it renumbers
+ids on save. `--no-contained-prune` and `--contained-nearest-host` adjust the
+contained-leaf phase; `--root-node` protects a root's leaf from it.
 
 Runs **de-loop → prune → re-centre × N → smooth**. Topology before geometry, so the
 smoother is never asked to smooth a segment about to be deleted — and smoothing goes

@@ -42,6 +42,105 @@ def add_parsers(sub, common, seg_common):
     p.add_argument("--skip-clearance", action="store_true",
                    help="derive a radius profile without displacing centrelines")
     p.add_argument("--report-json", default=None)
+    p = sub.add_parser("simplify-skeleton", parents=[common, seg_common],
+                       help="remove short leaves, then collapse short inner links into "
+                            "one junction (PMC10182136, Fig. 4); a dry run unless --apply")
+    p.add_argument("--segment", dest="segments", type=int, action="append", default=None,
+                   help="limit link collapse to this segment's junction neighbourhood; "
+                        "leaf pruning is tree-wide and is skipped")
+    p.add_argument("--no-leaf-prune", action="store_true", help="skip phase one")
+    p.add_argument("--no-contained-prune", action="store_true",
+                   help="keep leaves that lie inside another vessel's lumen "
+                        "(medial-sheet spurs of flattened lumens)")
+    p.add_argument("--contained-nearest-host", action="store_true",
+                   help="a leaf point counts as contained only if inside the nearest "
+                        "vessel's section (default: any nearby vessel's)")
+    p.add_argument("--root-node", dest="root_nodes", type=int, action="append", default=[],
+                   help="never remove a leaf ending at this node; repeat for several")
+    p.add_argument("--leaf-factor", type=float, default=None,
+                   help="prune_spurs length factor (parent radii)")
+    p.add_argument("--leaf-min-um", type=float, default=None,
+                   help="prune_spurs absolute leaf tolerance, the paper's user threshold")
+    p.add_argument("--link-factor", type=float, default=1.0,
+                   help="collapse inner links shorter than this many parent radii; 0 disables")
+    p.add_argument("--min-length-um", type=float, default=None,
+                   help="also collapse inner links shorter than this (paper, manual)")
+    p.add_argument("--auto-thinnest", action="store_true",
+                   help="also collapse inner links shorter than the thinnest vessel's "
+                        "diameter (paper, automatic)")
+    p.add_argument("--apply", action="store_true", help="edit the graph and write --out")
+    p.add_argument("--report-json", default=None)
+
+
+def run_simplify(args):
+    from .__main__ import _correct_units, _load, _open_lattice, _save
+    from .junction_links import simplify_links
+    from .junction_qualification import neighbourhood
+    from .skeleton_optimise import PRUNE_LENGTH_FACTOR, prune_spurs
+
+    if args.apply and not args.out:
+        raise ValueError("--apply needs --out")
+    if args.out and Path(args.out).resolve() in {Path(p).resolve() for p in args.graph}:
+        raise ValueError("write a separate output; the input graph must be preserved")
+    graph = _load(args.graph)
+    labels, frame, _ = _open_lattice(args)
+    stamp = _correct_units(graph, frame, args)
+    report = dict(method="PMC10182136 Fig. 4 phases 1-2", applied=bool(args.apply))
+    region = None
+    if args.segments:
+        region = sorted({s for sid in args.segments for s in neighbourhood(graph, sid)})
+        report["region_segments"] = region
+    if args.no_leaf_prune or region is not None:
+        report["leaves"] = dict(skipped="region" if region is not None else "requested")
+    else:
+        # prune_spurs edits in place; a dry run measures it on a copy.
+        target = graph if args.apply else _load(args.graph)
+        if not args.apply:
+            _correct_units(target, frame, args)
+        leaves = prune_spurs(target, length_factor=args.leaf_factor or PRUNE_LENGTH_FACTOR,
+                             min_length_um=args.leaf_min_um, bbox_um=frame.seg_bbox_um)
+        print(leaves.describe())
+        report["leaves"] = dict(vars(leaves), describe=leaves.describe())
+    if not args.no_contained_prune:
+        from .contained_leaves import find_contained_leaves, prune_contained_leaves
+        rows = find_contained_leaves(graph, labels, frame, sids=region,
+                                     protected_nodes=args.root_nodes,
+                                     any_host=not args.contained_nearest_host)
+        flagged = [r for r in rows if r["contained"]]
+        print(f"{len(flagged)} of {len(rows)} leaves lie inside another vessel's lumen"
+              f"{'' if args.apply else ' (would be removed)'}: {[r['segment'] for r in flagged]}")
+        report["contained_leaves"] = dict(rows=rows)
+        if args.apply and flagged:
+            report["contained_leaves"].update(prune_contained_leaves(graph, rows))
+            if region is not None:
+                region = [s for s in region if graph.has_segment(s)]
+    links = simplify_links(graph, labels, frame, factor=args.link_factor or None,
+                           min_length_um=args.min_length_um, auto_thinnest=args.auto_thinnest,
+                           sids=region, apply=args.apply)
+    print(links.describe())
+    for row in links.clusters:
+        print(f"  links {row['links']} nodes {row['nodes']}: {row['status']}"
+              + (f" ({row['reason']})" if row.get('reason') else "")
+              + (f", moved {row['move_from_p_ca_um']:.0f} of {row['ball_um']:.0f} um from p_CA"
+                 + (" [at search edge: review]" if row['at_ball_edge'] else "")
+                 if 'p_new' in row else ""))
+    report["links"] = links.to_dict()
+    if args.apply:
+        from .junction_links import saved_ids
+        report["renumbered"] = renumbered = saved_ids(graph)
+        for sid in args.segments or ():
+            if not graph.has_segment(sid):
+                print(f"segment {sid} was removed")
+                continue
+            new = renumbered["segments"].get(sid, sid)
+            if new != sid:
+                print(f"segment {sid} is saved as {new}; node and segment ids shift after "
+                      "each removed link (map in the report's 'renumbered')")
+        _save(graph, args.out, args.graph, voxel_um=stamp)
+    report_path = args.report_json or (str(args.out)+'.report.json' if args.out else None)
+    if report_path:
+        Path(report_path).write_text(json.dumps(report, indent=2, default=float), encoding='utf-8')
+    return 0
 
 
 def run(args):

@@ -221,6 +221,11 @@ class RefinementReport:
     method: str
     iterations: int = 0
     converged: bool = False
+    # Stable over the curve-supported, unblocked segments only. `converged` also
+    # requires every segment to be supported, which a region holding a segment with
+    # no usable section can never meet; this says whether the rest has settled.
+    supported_stable: bool = False
+    unsupported_segments: list = field(default_factory=list)
     moved_points: int = 0
     moved_nodes: int = 0
     seconds: float = 0.
@@ -294,21 +299,141 @@ def _crosses_section(graph, sid, origin, tangent, cut, spacing):
     return False
 
 
+def _section_sites(x, max_samples):
+    """Point indices sampled for sections: evenly spaced in arclength.
+
+    A site's *ordinal* (its position in this array) names the same physical place
+    between iterations; its point index does not, because moving the curve shifts
+    which point the evenly spaced arclength falls on.
+
+    A dense audit (budget >= point count) visits every exported point. Mapping n
+    uniform arclength stations back to indices can duplicate sparse intervals and
+    skip tightly sampled points, including narrow windows of exclusive support.
+    """
+    n = len(x)
+    if max_samples >= n:
+        return np.arange(n)
+    s = arclength(x)
+    return np.unique(np.searchsorted(s, np.linspace(0., s[-1], max_samples)))
+
+
+def _support_signature(accepted, sites):
+    """Accepted sections as site ordinals, comparable between iterations.
+
+    A held section can sit on a point next to its site (see `_hold_sections`), so
+    each accepted point is named by its nearest site.
+    """
+    sites = np.asarray(sites)
+    if not len(sites):
+        return ()
+    return tuple(sorted({int(np.argmin(np.abs(sites-int(i)))) for i in accepted}))
+
+
+def _hold_sections(sid, x, observation, sites, memory, tolerance):
+    """Keep each site's previous section result while the site stays within `tolerance`.
+
+    A site near a lumen boundary or a neighbouring branch can be accepted in one
+    iteration and rejected in the next without moving materially. Each flip moves
+    the fit target and the interpolated scale, which changes the next cut size and
+    the fit stiffness, so a nearly settled region never stops moving. The stored
+    anchor is where the site was last measured, so slow drift still triggers a
+    re-measurement once it adds up to `tolerance`. A held site reuses its old target
+    rather than a new measurement. Returns ``(observation, held, remeasured)``.
+    """
+    target, weights, good, measured = observation
+    target, weights = target.copy(), weights.copy()
+    fresh = dict(zip(map(int, good), measured))
+    kept, kept_measured, held, remeasured = [], [], 0, 0
+    for ordinal, i in enumerate(map(int, sites)):
+        previous = memory.get((sid, ordinal))
+        if previous is not None and np.linalg.norm(x[i]-previous['anchor']) < tolerance:
+            held += 1
+            accepted = previous['accepted']
+            target[i], weights[i] = x[i], 0.
+            if accepted:
+                # Attach the held target to the point nearest where it was measured.
+                # Evenly spaced sites slide along a curve that has moved, and a
+                # target left on the site's new point index pulls a different part
+                # of the curve (on region 318 this moved the optimum by ~100 um).
+                j = int(np.argmin(np.linalg.norm(x-previous['anchor'], axis=1)))
+                if j in kept:
+                    j = i
+                target[j], weights[j] = previous['target'], previous['weight']
+                kept.append(j)
+                kept_measured.append(previous['measured'])
+            continue
+        remeasured += 1
+        accepted = i in fresh
+        memory[sid, ordinal] = dict(anchor=x[i].copy(), accepted=accepted,
+                                    target=target[i].copy(), weight=float(weights[i]),
+                                    measured=fresh.get(i))
+        if accepted and i not in kept:
+            kept.append(i)
+            kept_measured.append(fresh[i])
+    # Scale is interpolated along the accepted points, which needs them in order.
+    order = np.argsort(kept, kind='stable')
+    kept = [kept[k] for k in order]
+    kept_measured = [kept_measured[k] for k in order]
+    return (target, weights, kept, kept_measured), held, remeasured
+
+
+def _point_to_polyline(points, line):
+    """Distance from each point to the nearest point of a polyline."""
+    points, line = np.asarray(points, float), np.asarray(line, float)
+    if len(line) == 1:
+        return np.linalg.norm(points-line[0], axis=1)
+    a, ab = line[:-1], np.diff(line, axis=0)
+    length2 = np.maximum(np.einsum('ij,ij->i', ab, ab), 1e-24)
+    t = np.clip(np.einsum('pij,ij->pi', points[:, None]-a[None], ab)/length2, 0., 1.)
+    nearest = a[None]+t[..., None]*ab[None]
+    return np.linalg.norm(nearest-points[:, None], axis=2).min(axis=1)
+
+
+def _shape_change(old, new):
+    """Symmetric Hausdorff distance between two polylines, in their units.
+
+    Blind to points sliding along an unchanged curve; still sees a curve that moves
+    across itself, and an end that moves along it (the far curve then has points
+    no longer covered by the other).
+    """
+    if not len(old) or not len(new):
+        return 0.
+    return float(max(_point_to_polyline(new, old).max(), _point_to_polyline(old, new).max()))
+
+
+def _fit_calibre(graph, sids, scale, measured):
+    """Bending calibre for the joint fits: a data-less segment borrows its neighbours'.
+
+    A segment that has never had an accepted section keeps its stored graph radius
+    as scale, and the bending weight grows with calibre**4. A terminal spur into a
+    vessel bulge (905 on region 3612/3655: 1.8 mm long, stored radius 1.67 mm,
+    no sections) then supplied 72% of its cluster's objective, so the fit spent itself
+    straightening an artefact. Such a segment takes the median calibre of measured
+    segments sharing a node with it; with none, it keeps its own. Section cut sizes
+    still use `scale`.
+    """
+    out = dict(scale)
+    for sid in sids:
+        if sid in measured:
+            continue
+        seg = graph.segment(sid)
+        near = [float(np.median(scale[o])) for n in (seg['node1'], seg['node2'])
+                for o in graph.node_segments(n) if o != sid and o in measured and o in scale]
+        if near:
+            out[sid] = np.full(len(scale[sid]), float(np.median(near)))
+    return out
+
+
 def _targets(graph, sid, frame, sampler, ctx, scale, max_half, max_samples,
              coherent=False, diagnostics=None, shape_aware=False, tangent_hint=None):
     x = graph.coords(sid)
     n = len(x)
     target, weights = x.copy(), np.zeros(n)
     sp = float(frame.seg_spacing[0])
-    s = arclength(x)
     scale = np.broadcast_to(scale, (n,))
     tangents = (robust_edge_tangents(x, scale, spacing_um=sp)
                 if tangent_hint is None else tangent_hint)
-    # A dense audit must actually visit every exported point. Mapping n uniform
-    # arclength stations back to indices can duplicate sparse intervals and skip
-    # tightly sampled points, including narrow windows of exclusive support.
-    ids = (np.arange(n) if max_samples >= n else
-           np.unique(np.searchsorted(s, np.linspace(0., s[-1], max_samples))))
+    ids = _section_sites(x, max_samples)
     invented = mask_for_segment(graph, sid)
     if len(invented) == n:
         ids = ids[~invented[ids]]
@@ -383,7 +508,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
            fixed_nodes=(), move_junctions=True, strength=.1, max_iterations=25,
            max_half=256, max_samples=32, workers=1, progress=None,
            section_progress=None, checkpoint=None, reuse_sections=True, root_nodes=(),
-           path_progress=None, dense_sids=()):
+           path_progress=None, dense_sids=(), section_hold_voxels=1.0):
     """Refine selected segments with full-graph branch context, preserving radii.
 
     Junctions move only when every incident segment participates. Overlapping
@@ -391,6 +516,8 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
     remain anchored; insufficiently supported neighbourhoods are reported.
     ``dense_sids`` visits every non-invented point on those selected segments
     during fitting and final auditing; other branches retain the sample budget.
+    A section site that has moved less than `section_hold_voxels` since it was
+    last measured keeps that result (0 re-measures every site every iteration).
     """
     if method not in METHODS:
         raise ValueError(f"unknown refinement method: {method}")
@@ -428,9 +555,13 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
             held.update(graph.nodes)
     local = threading.local()
     stable_rounds = 0
+    supported_rounds = 0
     previous_moves = {}
     previous_support = {}
     tangent_hints = {}
+    section_memory = {}
+    hold_um = float(section_hold_voxels)*sp
+    ever_measured = set()
     segment_stable_rounds = {sid: 0 for sid in sids}
     from ..rle import ByteRLELattice, RawLattice
     process_sections = workers > 1 and isinstance(labels, (ByteRLELattice, RawLattice))
@@ -485,6 +616,25 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
             if section_cache is not None:
                 for sid in pending:
                     section_cache.put(sid, observations[sid], section_diagnostics[sid])
+            # The cache keeps raw measurements; only the fit sees held sections.
+            # Sites exactly as `_targets` sampled them: per-segment budget (dense
+            # segments visit every point) and interpolated points removed.
+            sites = {}
+            for sid in sids:
+                if len(before[sid]) < 4:
+                    sites[sid] = np.array([], dtype=int)
+                    continue
+                ids = _section_sites(before[sid], sample_limits[sid])
+                invented = mask_for_segment(graph, sid)
+                sites[sid] = ids[~invented[ids]] if len(invented) == len(before[sid]) else ids
+            held_total = remeasured_total = 0
+            if hold_um > 0:
+                for sid in sids:
+                    # Not `held`: that name is the set of fixed nodes.
+                    observations[sid], n_held, n_fresh = _hold_sections(
+                        sid, before[sid], observations[sid], sites[sid], section_memory, hold_um)
+                    held_total += n_held
+                    remeasured_total += n_fresh
             # Internal unsupported links can be fitted from exclusive sections on
             # the external approaches of a jointly solved junction cluster.
             node_targets = {}
@@ -500,10 +650,12 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                 target, weights, good, measured = observations[sid]
                 if measured:
                     scale[sid] = np.maximum(2*sp, np.interp(arclength(x), arclength(x)[good], measured))
+                    ever_measured.add(sid)
                 if len(good) >= 2 and centroid:
                     residual = np.linalg.norm(target-x, axis=1)
                     typical = max(sp, float(np.median(residual[weights > 0])))
                     weights *= np.minimum(1., 2*typical/np.maximum(residual, sp))
+            fit_scale = _fit_calibre(graph, sids, scale, ever_measured)
             # Solve shared junctions BEFORE independent interiors. Failed joint
             # fits must not leave bowed interiors attached to unchanged nodes.
             deferred, junction_pins = set(), {sid: set() for sid in sids}
@@ -511,7 +663,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                 from .dfs_refine import fit_paths
                 with graph.batch('longest path first fitting'):
                     report.neighbourhoods = fit_paths(graph, report.path_plan, sids,
-                        observations, scale, sampler, frame, strength, held,
+                        observations, fit_scale, sampler, frame, strength, held,
                         section_weighting=shape_aware,
                         progress=(lambda row: path_progress(dict(iteration=iteration+1, **row)))
                         if path_progress else None)
@@ -522,7 +674,7 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
             elif centroid and move_junctions:
                 with graph.batch('joint junction and approach fitting'):
                     report.neighbourhoods = refine_neighbourhoods(
-                        graph, node_targets, observations, scale, sampler, frame, strength)
+                        graph, node_targets, observations, fit_scale, sampler, frame, strength)
                 for row in report.neighbourhoods.values():
                     if row['status'] not in ('moving', 'stationary'):
                         deferred.update(row['segments'])
@@ -574,7 +726,9 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                     oscillating = previous is not None and np.sum(delta*previous) < 0
                     oscillations += int(oscillating)
                     alpha = .25 if oscillating else 1.
-                    support = tuple(observations[sid][2])
+                    # By site ordinal: the same accepted places can land on
+                    # different point indices once the curve moves.
+                    support = _support_signature(observations[sid][2], sites[sid])
                     support_changes += int(sid in previous_support and previous_support[sid] != support)
                     if sid in previous_support and previous_support[sid] != support:
                         changed_support.add(sid)
@@ -611,15 +765,30 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
                         graph.set_segment_coords(sid, trial[sid])
                 blocked = len(blocked_ids)
                 # Include shared-node and neighbourhood movement in convergence.
-                moves = [float(np.linalg.norm(graph.coords(sid)-before[sid], axis=1).max())
+                # Convergence is judged on the curve's shape, not its points: the
+                # joint fit re-spaces points along an unchanged curve (18 um per
+                # iteration on 2699, region 318, with 0.1 um across it), which
+                # point displacement counts as movement for ever.
+                moves = [_shape_change(before[sid], graph.coords(sid))
                          for sid in sids if len(before[sid])]
+                point_moves = [float(np.linalg.norm(graph.coords(sid)-before[sid], axis=1).max())
+                               for sid in sids if len(before[sid])]
             peak = float(max(moves, default=0.))
             report.iterations = iteration+1
+            moved = dict(zip([sid for sid in sids if len(before[sid])], moves))
+            pinned = sum(len(points) for row in report.neighbourhoods.values()
+                         for points in row.get('pinned_points', {}).values())
             report.history.append(dict(iteration=iteration+1, max_move_um=peak,
+                                       max_point_move_um=float(max(point_moves, default=0.)),
+                                       median_move_um=float(np.median(moves)) if moves else 0.,
+                                       peak_segment=max(moved, key=moved.get) if moved else None,
                                        reused_section_segments=cache_hits,
                                        accepted_sections=accepted_total, blocked_segments=blocked,
                                        oscillating_segments=oscillations,
-                                       changed_support_segments=support_changes))
+                                       changed_support_segments=support_changes,
+                                       held_sections=held_total,
+                                       remeasured_sections=remeasured_total,
+                                       pinned_points=pinned))
             if shape_aware:
                 from .section_shape import centring_summary
                 for sid in sids:
@@ -650,6 +819,14 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
             stable_rounds = (stable_rounds+1 if peak < .1*sp and blocked == 0
                              and supported and support_changes == 0 else 0)
             report.converged = stable_rounds >= 2
+            settled = [moved.get(sid, 0.) for sid in sids
+                       if sid in curve_supported and sid not in blocked_ids]
+            supported_rounds = (supported_rounds+1 if max(settled, default=0.) < .1*sp
+                                and support_changes == 0 else 0)
+            report.supported_stable = supported_rounds >= 2
+            report.unsupported_segments = sorted(set(sids)-curve_supported)
+            report.history[-1].update(supported_max_move_um=max(settled, default=0.),
+                                      unsupported_segments=len(report.unsupported_segments))
             if checkpoint:
                 report.seconds = time.monotonic()-t0
                 checkpoint(report.to_dict())

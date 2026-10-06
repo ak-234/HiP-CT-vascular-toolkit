@@ -2924,6 +2924,11 @@ def cmd_refine_centreline(args) -> int:
     return run(args)
 
 
+def cmd_simplify_skeleton(args) -> int:
+    from .centreline_cli import run_simplify
+    return run_simplify(args)
+
+
 def cmd_crop(args) -> int:
     from pathlib import Path
 
@@ -3488,6 +3493,7 @@ def main(argv=None) -> int:
         "radius-perimeter": cmd_radius_perimeter,
         "refine-centreline": cmd_refine_centreline,
         "prepare-reconstruction": cmd_refine_centreline,
+        "simplify-skeleton": cmd_simplify_skeleton,
         "segment-diagnosis": cmd_segment_diagnosis,
         "junction-mask": cmd_junction_mask,
         "reformat-radius": cmd_reformat_radius,
