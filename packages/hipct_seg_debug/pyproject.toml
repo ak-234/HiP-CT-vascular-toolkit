@@ -69,6 +69,9 @@ dependencies = [
 
     # --- skeletonisation and scoring ----------------------------------------
     "kimimaro==5.8.4",           # TEASAR, one of the `--skeletoniser` backends
+    # kimimaro leaves osteoid unpinned; 0.7.2+ assumes NumPy 2 promotion
+    # (`ct += n` on a 0-d uint32 array) and fails under numpy 1.26.
+    "osteoid==0.7.1",
     "scikit-learn==1.5.1",       # DPC feature model
     "statsmodels==0.14.2",       # DPC statistics
 

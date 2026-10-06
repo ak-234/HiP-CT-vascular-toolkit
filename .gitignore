@@ -4,6 +4,9 @@ __pycache__/
 *.egg-info/
 *.egg
 build/
+# MkDocs: gathered sources (tools/collect_docs.py) and the built site
+.docs_src/
+site/
 dist/
 .eggs/
 .venv/

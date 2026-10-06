@@ -1,0 +1,42 @@
+# Read the Docs builds this after `python tools/collect_docs.py`, which gathers the
+# repository's Markdown into .docs_src/ with its original layout (see that script).
+site_name: HiP-CT Vascular Toolkit
+repo_url: https://github.com/ak-234/HiP-CT-vascular-toolkit
+edit_uri: ""
+docs_dir: .docs_src
+theme:
+  name: readthedocs
+markdown_extensions:
+  - tables
+  - fenced_code
+  - toc:
+      permalink: true
+nav:
+  - Home: index.md
+  - hipct_seg_debug:
+      - Overview: packages/hipct_seg_debug/README.md
+      - Command line: packages/hipct_seg_debug/docs/CLI.md
+      - Editor: packages/hipct_seg_debug/docs/EDITOR.md
+      - Skeletonisation: packages/hipct_seg_debug/docs/SKELETONISATION.md
+      - Centreline refinement: packages/hipct_seg_debug/docs/CENTRELINE_REFINEMENT.md
+      - Junction refinement: packages/hipct_seg_debug/docs/JUNCTION_REFINEMENT.md
+      - Centreline qualification (LADAF-2021-17): packages/hipct_seg_debug/docs/CENTRELINE_QUALIFICATION_2021_17.md
+      - Jin minimum-cost-path skeletonisation: packages/hipct_seg_debug/docs/JIN_MCP.md
+      - Geodesic reconnection: packages/hipct_seg_debug/docs/GEODESIC_RECONNECTION.md
+      - Wavefront reconnection: packages/hipct_seg_debug/docs/WAVEFRONT_RECONNECTION.md
+      - Reformat: packages/hipct_seg_debug/docs/REFORMAT.md
+      - Changelog: packages/hipct_seg_debug/CHANGELOG.md
+  - coronary_sdf:
+      - Overview: packages/coronary_sdf/README.md
+      - UML diagrams: packages/coronary_sdf/docs/uml_diagrams.md
+      - Epicardial annotation: packages/coronary_sdf/epicardial_annotation_README.md
+      - Mesh sensitivity study: packages/coronary_sdf/mesh_sensitivity_study_README.md
+      - Plane sensitivity: packages/coronary_sdf/plane_sensitivity_README.md
+      - Simpleware coronary regions: packages/coronary_sdf/simpleware_coronary_regions_README.md
+      - Strahler analysis: packages/coronary_sdf/strahler_analysis_README.md
+      - CFX remesh session template: packages/coronary_sdf/cfx_remesh_session_template_README.md
+      - Epicardial radius handoff: packages/coronary_sdf/HANDOFF_epicardial_radius.md
+      - BioMedEng 2026 talk guide: packages/coronary_sdf/BioMedEng2026_talk_guide.md
+  - skeleton_analysis:
+      - Overview: packages/skeleton_analysis/README.md
+      - Porting notes: packages/skeleton_analysis/PORTING.md

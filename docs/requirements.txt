@@ -1,0 +1,2 @@
+# Read the Docs build only (see .readthedocs.yaml); not needed to use the toolkit.
+mkdocs==1.6.1

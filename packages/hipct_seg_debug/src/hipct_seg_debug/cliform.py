@@ -259,8 +259,10 @@ def repeat_separator(f: FieldSpec) -> str | None:
     Paths take ``;``. A Windows path routinely contains spaces, and splitting
     ``D:/data dir/a b.am`` on whitespace invents three files that do not exist.
     Everything else -- segment ids, mostly -- keeps the spaces-and-commas it had.
+    A repeatable multi-value flag (``--vmtk-target-xyz X Y Z``, given once per seed)
+    also takes ``;`` between groups, since its own values are space-separated.
     """
-    return ";" if f.path_role else None
+    return ";" if f.path_role or f.nargs > 1 else None
 
 
 def split_repeat(f: FieldSpec, text: str) -> list:
@@ -271,7 +273,9 @@ def split_repeat(f: FieldSpec, text: str) -> list:
 
 def join_repeat(f: FieldSpec, value) -> str:
     sep = repeat_separator(f)
-    return ("; " if sep else " ").join(str(v) for v in repeat_values(f, value))
+    def one(v):
+        return " ".join(str(x) for x in v) if isinstance(v, (list, tuple)) else str(v)
+    return ("; " if sep else " ").join(one(v) for v in repeat_values(f, value))
 
 
 def is_unset(spec: FieldSpec, value: Any) -> bool:
@@ -325,7 +329,13 @@ def to_argv(spec: CommandSpec, values: dict, *, force_all: bool = False) -> list
         if f.repeatable:
             if not is_unset(f, value):
                 for item in repeat_values(f, value):
-                    tail.append(f"{f.flag}={_text(item, f.kind)}")
+                    if f.nargs > 1:
+                        # `--vmtk-target-xyz X Y Z` once per group; `--flag=X` would
+                        # hand argparse one token where it needs nargs.
+                        tail.append(f.flag)
+                        tail.extend(_text(v, f.kind) for v in item)
+                    else:
+                        tail.append(f"{f.flag}={_text(item, f.kind)}")
             continue
 
         if is_unset(f, value):
@@ -638,6 +648,10 @@ def _read(f: FieldSpec, widget):
     if f.repeatable:
         caster = float if f.kind == FLOAT else int if f.kind == INT else str
         try:
+            if f.nargs > 1:
+                groups = [[caster(p) for p in g.replace(",", " ").split()]
+                          for g in split_repeat(f, text)]
+                return groups if all(len(g) == f.nargs for g in groups) else None
             return [caster(p) for p in split_repeat(f, text)]
         except ValueError:
             return None

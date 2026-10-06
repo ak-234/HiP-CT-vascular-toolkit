@@ -14,6 +14,7 @@ that for every command at once.
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 
 import pytest
@@ -169,8 +170,15 @@ def test_a_fully_populated_form_round_trips(name):
 
 
 def _other_than(f):
+    if f.repeatable and f.nargs > 1:
+        # e.g. `--vmtk-target-xyz X Y Z`, repeatable: a list of nargs-tuples.
+        return [_other_than(dataclasses.replace(f, repeatable=False, default=None))]
     if f.repeatable:
         return [7] if f.kind == cliform.INT else ["value"]
+    if f.nargs > 1:
+        # A multi-value flag (e.g. `--roi-zyx`, six ints) is a list of exactly nargs.
+        one = _other_than(dataclasses.replace(f, nargs=1, default=None))
+        return [one] * f.nargs
     if f.kind == cliform.FLAG:
         return not f.default
     if f.kind == cliform.CHOICE:
@@ -426,3 +434,23 @@ def test_radius_perimeter_branch_aware_controls_parse():
     assert args.root_edge == [7, 19]
     assert args.tangent_search_deg == 15.0
     assert args.carina_tip_factor == 0.08
+
+
+def test_a_repeatable_multi_value_flag_keeps_its_groups():
+    """`--vmtk-target-xyz X Y Z`, once per outlet: groups must not be flattened.
+
+    Emitting `--vmtk-target-xyz=1` per number hands argparse one token where it
+    needs three, and the panel would refuse every VMTK run with more than a value.
+    """
+    spec = SPECS["skeletonise-all"]
+    field = next(f for f in spec.fields if f.dest == "vmtk_target_xyz")
+    assert field.repeatable and field.nargs == 3
+    values = _minimal(spec)
+    values["vmtk_target_xyz"] = [[1.0, 2.0, 3.0], [-4.5, 5.0, 6.0]]
+    argv = cliform.to_argv(spec, values)
+    at = [i for i, token in enumerate(argv) if token == "--vmtk-target-xyz"]
+    assert [argv[i + 1:i + 4] for i in at] == [["1.0", "2.0", "3.0"], ["-4.5", "5.0", "6.0"]]
+    parsed = edit_parser().parse_args(argv)
+    assert parsed.vmtk_target_xyz == [[1.0, 2.0, 3.0], [-4.5, 5.0, 6.0]]
+    assert cliform.join_repeat(field, values["vmtk_target_xyz"]) == "1.0 2.0 3.0; -4.5 5.0 6.0"
+    assert cliform.split_repeat(field, "1 2 3; -4.5 5 6") == ["1 2 3", "-4.5 5 6"]
