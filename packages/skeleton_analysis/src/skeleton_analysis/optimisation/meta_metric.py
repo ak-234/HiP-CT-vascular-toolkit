@@ -20,6 +20,7 @@ Fixes vs MATLAB
 from __future__ import annotations
 
 from dataclasses import dataclass
+import warnings
 from typing import Mapping, Optional, Sequence
 
 import numpy as np
@@ -136,7 +137,16 @@ def meta_metric(
 
     ``candidate`` / ``reference`` are mappings of metric name -> value; only the
     ``keys`` present in ``reference`` with a non-zero value are used.
+
+    .. deprecated::
+        This is the original MATLAB formula (root of summed squares, branch-point
+        count), not the paper's super metric. Use
+        :func:`skeleton_analysis.optimisation.supermetric.super_metric`.
     """
+    warnings.warn(
+        "meta_metric is the legacy MATLAB formula and is deprecated; use "
+        "skeleton_analysis.optimisation.supermetric.super_metric (Walsh et al. 2024, Eq. 10).",
+        DeprecationWarning, stacklevel=2)
     terms = []
     for k in keys:
         if k not in reference or k not in candidate:

@@ -142,10 +142,22 @@ PROTECTED: dict[str, set[str]] = {
         # analysis_out/subvoxel_bias.py -> research_scripts/subvoxel_bias.py
         "src/hipct_seg_debug/edit/radius_perimeter.py",
         "tests/test_radius_perimeter.py",
+        # super metric moved onto the shared skeleton_analysis core (monorepo-only change)
+        "src/hipct_seg_debug/edit/supermetric.py",
+        "src/hipct_seg_debug/edit/__main__.py",
+        "tests/test_supermetric.py",
+        "docs/SKELETONISATION.md",
     },
     "skeleton_analysis": {
         "Python_port_test.py",
         "README.md",
+        # the paper's super metric lives here now; the legacy port is deprecated
+        "src/skeleton_analysis/optimisation/__init__.py",
+        "src/skeleton_analysis/optimisation/supermetric.py",
+        "src/skeleton_analysis/optimisation/meta_metric.py",
+        "src/skeleton_analysis/optimisation/volume_metrics.py",
+        "tests/test_supermetric.py",
+        "PORTING.md",
     },
 }
 

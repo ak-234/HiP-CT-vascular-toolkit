@@ -1,203 +1,181 @@
-"""The Walsh-Berg super metric: how much did this skeletonisation lose?
+"""The Walsh-Berg super metric, scored on this package's graphs.
 
-Faithful implementation of Eq. 10 of
+The metric itself -- Eq. 10 of
 
     C.L. Walsh, M. Berg, H. West, N.A. Holroyd, S. Walker-Samuel, R.J. Shipley,
     "Reconstructing microvascular network skeletons from 3D images: What is the
     ground truth?", Computers in Biology and Medicine 171 (2024) 108140.
 
-``docs/SKELETONISATION.md`` carries the full translation, the two
-deliberate departures, and the table of where ``skeleton_analysis`` diverges from the
-paper. The short version:
-
-There is no ground-truth skeleton -- the only published manual consensus centrelines
-took over 500 hours of expert time for three coronary branches -- so the *segmentation*
-is the gold standard, and the question becomes how much of its information the
-skeletonisation threw away. Five terms, each comparing the graph ``S`` to the binary
-image ``I``::
+-- lives in one place, :mod:`skeleton_analysis.optimisation.supermetric`. This
+module adapts an :class:`~.graphmodel.EditableGraph` and a
+:class:`~..frame.WorldFrame` to it, and adds what is specific to the coronary
+pipeline: per-tree scoring, voxel-weighted aggregation, and reading the mask from
+an RLE lattice without decoding it.
 
     M_S = |V_I - V_S|/V_I + |cc_I - cc_S|/cc_I + |chi_I - chi_S|/chi_I
           + |1 - cl_S| / cl_S**3   +   |1 - B_S| / B_S**2
 
 Lower is better; zero is identical.
 
+**Options.** Scoring here defaults to the ``CORONARY`` preset of
+:class:`~skeleton_analysis.optimisation.supermetric.SuperMetricOptions`: the
+bifurcation reference is the mask's own skeleton junctions (there is no manual
+annotation), there is no sub-volume, ``chi`` is scored against a tree (see
+:attr:`ImageTerms.chi`), and points Avizo interpolated are left out of ``V`` and
+``cl``. Pass ``options=PAPER`` (or ``--metric-preset paper``) for numbers that are
+comparable with the paper. ``docs/SKELETONISATION.md`` records each departure.
+
 **The non-linear weights are the design, not a detail.** ``cl`` enters as ``1/cl**3``,
 so even a small drop in the fraction of centreline lying inside the mask dominates the
-sum and rejects the skeleton: an algorithm may reasonably cut a corner, but long
-stretches of centreline *outside* the segmentation never plausible. ``B`` is weighted
-more softly at ``1/B**2`` because its reference is annotated rather than measured.
-:func:`super_metric` therefore returns every term separately as well as the total --
-the paper's own use of it (Fig. 8B) is to read which term dominates, which says *how*
-an algorithm is failing. For Amira AutoSkeleton that was the volume term, pinning the
-fault on its 1/5-Chamfer radius estimator rather than on its topology.
-
-Why this is not ``skeleton_analysis.optimisation.super_metric``: that function computes
-``V``, ``cc`` and ``chi`` from **two volumes**, so as :mod:`~.optimise` already records,
-"its Volume/CC/Euler terms are identical for both and contribute exactly nothing" when
-comparing two skeletons of one mask. Taking them from the **graph** instead, per the
-paper's Table S13, is what makes the metric an objective a skeleton can be optimised
-against. It also uses an unweighted RMS, a branch-point *count* where the paper uses
-bifurcation *Dice*, and a point-sampled ``cl`` where the paper rasterises the lines.
+sum and rejects the skeleton. ``B`` is weighted more softly at ``1/B**2`` because its
+reference is annotated (or, here, derived) rather than measured. :func:`super_metric`
+therefore returns every term separately as well as the total -- the paper's own use of
+it (Fig. 8B) is to read which term dominates, which says *how* an algorithm is failing.
 """
 
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+import warnings
+from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
-# The paper's local Euler characteristic, reformulated from the classical one so that a
-# network with a single loop (chi_classical == 0) does not make the relative difference
-# undefined. Supplementary section 7 prints ``chi = -chi_classical - 2``, which is
-# negative for a tree and so contradicts its own "always positive" requirement; the main
-# text's form below is the one used. The same transform is applied to image and graph,
-# which is the only way their relative difference means anything.
+from ._deps import ensure_skeleton_analysis
+
+ensure_skeleton_analysis()
+from skeleton_analysis.optimisation import supermetric as core  # noqa: E402
+from skeleton_analysis.optimisation.supermetric import (  # noqa: E402,F401
+    CORONARY,
+    PAPER,
+    SuperMetricOptions,
+)
+
+
 def local_euler(chi_classical: float) -> float:
     """``2 - chi_classical`` -- strictly positive for any graph or solid."""
-    return 2.0 - float(chi_classical)
+    return float(core.local_euler(chi_classical))
+
+
+def options_for(preset: str = "coronary", *, tree_chi: bool | None = None,
+                bb_threshold: float | None = None) -> SuperMetricOptions:
+    """The options a command line asks for.
+
+    `preset` is ``"coronary"`` or ``"paper"``. `tree_chi` overrides the preset's chi
+    reference. A `bb_threshold` (um) replaces the radius-based bifurcation tolerance
+    with that fixed distance, as before this module used the shared core.
+    """
+    base = core.PRESETS[preset]
+    changes = {}
+    if tree_chi is not None:
+        changes["chi_reference"] = "tree" if tree_chi else "image"
+    if bb_threshold is not None:
+        changes.update(tolerance="fixed", tolerance_value=float(bb_threshold))
+    return SuperMetricOptions(**{**asdict(base), **changes}) if changes else base
+
+
+# ------------------------------------------------------------------ adapters
+
+
+def _frame_geometry(frame):
+    """``(voxel_size, origin)`` in um, (x, y, z), of the segmentation lattice."""
+    return (np.asarray(frame.seg_spacing, dtype=np.float64),
+            np.asarray(frame.seg_origin, dtype=np.float64))
+
+
+def _valid_points(graph, sid: int, n: int) -> np.ndarray:
+    """(n,) bool -- False where Avizo invented the point rather than skeletonising it."""
+    from .interpolation import mask_for_segment
+
+    invented = mask_for_segment(graph, sid)
+    if invented.size != n:
+        return np.ones(n, dtype=bool)
+    return ~invented
+
+
+def to_skeleton_graph(graph, segs=None, *, include_isolated: bool = True):
+    """The shared metric's :class:`SkeletonGraph` for an ``EditableGraph``.
+
+    `segs` restricts it to those segment ids (and their nodes). Isolated nodes are
+    included for the whole graph -- each is a component, per the paper -- but not
+    when `segs` nominates a subgraph. A one-point segment is repeated so it still
+    rasterises to its voxel and contributes no length.
+    """
+    seg_ids = list(graph.segment_ids()) if segs is None else [int(s) for s in segs]
+    if segs is None and include_isolated:
+        node_ids = list(graph.nodes)
+    else:
+        node_ids = sorted({graph.segment(s)[k] for s in seg_ids for k in ("node1", "node2")})
+    index = {nid: i for i, nid in enumerate(node_ids)}
+    nodes = np.array([graph.nodes[n][:3] for n in node_ids], dtype=np.float64).reshape(-1, 3)
+    edges, points, radii, valid = [], [], [], []
+    for sid in seg_ids:
+        seg = graph.segment(sid)
+        coords = graph.coords(sid)
+        r = graph.radii(sid)
+        ok = _valid_points(graph, sid, len(coords))
+        if len(coords) == 0:
+            coords = np.array([graph.nodes[seg["node1"]][:3]], dtype=np.float64)
+            r, ok = np.zeros(1), np.ones(1, dtype=bool)
+        if len(coords) == 1:
+            coords, r, ok = np.repeat(coords, 2, axis=0), np.repeat(r, 2), np.repeat(ok, 2)
+        edges.append((index[seg["node1"]], index[seg["node2"]]))
+        points.append(coords)
+        radii.append(r)
+        valid.append(ok)
+    with warnings.catch_warnings():
+        # Pipeline segments need not carry their end nodes as points; the metric
+        # does not rely on it.
+        warnings.filterwarnings("ignore", message=".*do not start/end at their edge's nodes")
+        return core.SkeletonGraph(nodes, np.asarray(edges, dtype=np.int64).reshape(-1, 2),
+                                  points, radii, valid)
 
 
 # ------------------------------------------------------------------ graph terms
 
 
-def graph_volume(graph) -> float:
-    """Total network volume in um^3, as the sum of subsegment frusta.
-
-    Table S13's "sum of volume of all subsegments". A subsegment is the span between
-    two consecutive centreline points, so its volume is taken as a cylinder of the
-    mean of the two radii -- which is what makes this term sensitive to the radius
-    estimator, and is why it is the term that exposed AutoSkeleton's 1/5-Chamfer
-    approximation in the paper.
-
-    Subsegments Avizo interpolated are left out. Both of this term's inputs are
-    fabricated there -- an invented length carrying an invented radius -- so counting
-    them lets a graph score better for containing more of what it made up.
-    """
-    total = 0.0
-    for sid in graph.segment_ids():
-        coords = graph.coords(sid)
-        radii = graph.radii(sid)
-        if len(coords) < 2:
-            continue
-        lengths = np.linalg.norm(np.diff(coords, axis=0), axis=1)
-        mean_r = 0.5 * (radii[:-1] + radii[1:])
-        keep = _real_subsegments(graph, sid, len(coords))
-        total += float(np.sum(np.pi * mean_r[keep] * mean_r[keep] * lengths[keep]))
-    return total
-
-
-def _real_subsegments(graph, sid: int, n: int) -> np.ndarray:
-    """(n-1,) bool -- spans between two consecutive points that were actually skeletonised.
-
-    A span counts as invented if *either* end is, which is the conservative reading:
-    the half-step from a real anchor into a fill is still following the fill.
-    """
-    from .interpolation import mask_for_segment
-
-    invented = mask_for_segment(graph, sid)
-    if invented.size != n or not invented.any():
-        return np.ones(max(n - 1, 0), dtype=bool)
-    return ~(invented[:-1] | invented[1:])
+def graph_volume(graph, *, exclude_invented: bool = True) -> float:
+    """Total network volume in um^3: the sum of subsegment cylinders, each of the
+    mean of its two radii (Table S13). Subsegments Avizo interpolated are left out
+    by default -- an invented length carrying an invented radius."""
+    return to_skeleton_graph(graph).volume(exclude_invented)
 
 
 def graph_components(graph) -> int:
-    """Number of subnetworks -- ``cc`` computed from the graph."""
-    return len(graph.components())
+    """Number of subnetworks -- ``cc`` from the graph. An isolated node counts."""
+    return to_skeleton_graph(graph).n_components()
 
 
 def graph_euler_classical(graph, segs=None) -> int:
-    """``N - E`` of the **largest** subgraph, the graph form of the Euler number.
+    """``N - E`` of the **largest** subgraph (by volume), the graph form of the Euler
+    number (Table S13). A tree gives 1 and each independent loop subtracts one.
 
-    Table S13: "For the largest subgraph no. of nodes - no. of segments". A tree gives
-    1, and each independent loop subtracts one, so this counts the graph's loops the
-    way tunnels count in the solid.
-
-    Largest by segment count, matching ``components()``' own ordering, because the
-    paper's concern is the component carrying the blood -- Supplementary Figure S2
-    shows the largest connected component holds the great majority of the volume.
-
-    `segs` scores one nominated component's segment ids instead. On a mask holding a
-    left *and* a right coronary tree the default measures the left one alone, so a
-    change confined to the right moves this term not at all -- which is why
-    :func:`super_metric_per_tree` passes each tree explicitly.
+    `segs` scores one nominated component's segment ids instead -- the per-tree path.
     """
     if segs is not None:
-        biggest = set(int(s) for s in segs)
-    else:
-        comps = graph.components()
-        if not comps:
+        segs = list(segs)
+        if not segs:
             return 0
-        biggest = comps[0]
-    nodes = set()
-    for sid in biggest:
-        seg = graph.segment(sid)
-        nodes.add(seg["node1"])
-        nodes.add(seg["node2"])
-    return len(nodes) - len(biggest)
+        return to_skeleton_graph(graph, segs).largest_component_euler_classical()
+    if not graph.segment_ids():
+        return 0
+    return to_skeleton_graph(graph, include_isolated=False).largest_component_euler_classical()
 
 
-def rasterise_centreline(graph, frame) -> np.ndarray:
-    """Unique ``(iz, iy, ix)`` voxels covered by the centreline, Bresenham-style.
-
-    The paper transforms the spatial graph "to a binary image of lines via Bresenham
-    algorithm" before measuring overlap, and the distinction matters. ``skeleton_
-    analysis``'s ``centreline_sensitivity`` instead samples the mask *at the graph's
-    points*; on a smoothed Avizo graph consecutive points are many voxels apart, so
-    that scores a centreline as wholly inside the mask even when the straight segment
-    between two of its points leaves the vessel entirely.
-
-    Integer DDA rather than the textbook error-accumulating Bresenham: stepping the
-    longest axis one voxel at a time and rounding the other two gives the same
-    26-connected voxel chain in three dimensions, in vectorised form.
-    """
-    ijk_all: list[np.ndarray] = []
-    for sid in graph.segment_ids():
-        ijk_all.extend(_rasterise_segment_ijk(graph, sid, frame))
-    if not ijk_all:
-        return np.empty((0, 3), dtype=np.int64)
-    flat = np.vstack(ijk_all)
-    # Stored as (iz, iy, ix) to index a volume directly.
-    zyx = flat[:, ::-1]
-    return np.unique(zyx, axis=0)
+def _raster_zyx(sg, frame, exclude_invented: bool) -> np.ndarray:
+    voxel_size, origin = _frame_geometry(frame)
+    return core.rasterise_voxels(sg, voxel_size, origin, exclude_invented)
 
 
-def _rasterise_segment_ijk(graph, sid, frame) -> list[np.ndarray]:
-    """The DDA chunks for one segment, as ``(i, j, k)`` -- see :func:`rasterise_centreline`."""
-    out: list[np.ndarray] = []
-    coords = graph.coords(sid)
-    if len(coords) == 0:
-        return out
-    ijk = frame.um_to_seg(coords)  # (N, 3) as (i, j, k) = (x, y, z) indices
-    if len(ijk) == 1:
-        out.append(np.rint(ijk).astype(np.int64))
-        return out
-    a, b = ijk[:-1], ijk[1:]
-    # An invented span is not centreline, so it neither earns credit for lying
-    # inside the mask nor is penalised for leaving it.
-    keep = _real_subsegments(graph, sid, len(coords))
-    a, b = a[keep], b[keep]
-    steps = np.ceil(np.abs(b - a).max(axis=1)).astype(np.int64)
-    for p, q, n in zip(a, b, steps):
-        if n <= 0:
-            out.append(np.rint(p).astype(np.int64)[None, :])
-            continue
-        t = np.linspace(0.0, 1.0, int(n) + 1)[:, None]
-        out.append(np.rint(p[None, :] * (1.0 - t) + q[None, :] * t).astype(np.int64))
-    return out
+def rasterise_centreline(graph, frame, *, exclude_invented: bool = True) -> np.ndarray:
+    """Unique ``(iz, iy, ix)`` voxels covered by the centreline, Bresenham lines
+    between consecutive points (Table S13), including voxels outside the lattice."""
+    return _raster_zyx(to_skeleton_graph(graph), frame, exclude_invented)
 
 
 def rasterise_segment(graph, sid, frame) -> np.ndarray:
-    """Unique ``(iz, iy, ix)`` voxels covered by one segment's centreline.
-
-    The per-segment half of :func:`rasterise_centreline`, so a caller that needs to
-    know *which* segment covered a voxel -- assigning each edge to a mask component,
-    for one -- does not have to re-implement the DDA.
-    """
-    chunks = _rasterise_segment_ijk(graph, sid, frame)
-    if not chunks:
-        return np.empty((0, 3), dtype=np.int64)
-    return np.unique(np.vstack(chunks)[:, ::-1], axis=0)
+    """Unique ``(iz, iy, ix)`` voxels covered by one segment's centreline."""
+    return _raster_zyx(to_skeleton_graph(graph, [sid]), frame, True)
 
 
 def _sample_mask(labels, zyx: np.ndarray, dims) -> np.ndarray:
@@ -208,10 +186,10 @@ def _sample_mask(labels, zyx: np.ndarray, dims) -> np.ndarray:
         & (zyx[:, 1] >= 0) & (zyx[:, 1] < ny)
         & (zyx[:, 2] >= 0) & (zyx[:, 2] < nx)
     )
-    out = np.zeros(len(zyx), dtype=bool)
     sel = zyx[inb]
+    res = np.zeros(len(zyx), dtype=bool)
     if len(sel) == 0:
-        return out
+        return res
     if isinstance(labels, np.ndarray):
         vals = labels[sel[:, 0], sel[:, 1], sel[:, 2]]
     else:
@@ -222,22 +200,21 @@ def _sample_mask(labels, zyx: np.ndarray, dims) -> np.ndarray:
             m = sel[:, 0] == kz
             plane = labels.slice_z(int(kz))
             vals[m] = plane[sel[m, 1], sel[m, 2]]
-    res = np.zeros(len(zyx), dtype=bool)
     res[inb] = vals > 0
     return res
 
 
-def cl_sensitivity(graph, frame, labels) -> float:
-    """Fraction of the rasterised centreline lying inside the segmentation.
-
-    ``sum(V_I . l_S) / sum(l_S)`` of Table S13 -- the sensitivity half of clDice, and
-    the term the ``1/cl**3`` weight makes dominant.
-    """
-    zyx = rasterise_centreline(graph, frame)
+def _cl_from_skeleton(sg, frame, labels, exclude_invented: bool) -> float:
+    zyx = _raster_zyx(sg, frame, exclude_invented)
     if len(zyx) == 0:
         return float("nan")
-    inside = _sample_mask(labels, zyx, frame.seg_dims)
-    return float(inside.sum() / len(zyx))
+    return float(_sample_mask(labels, zyx, frame.seg_dims).sum() / len(zyx))
+
+
+def cl_sensitivity(graph, frame, labels, *, exclude_invented: bool = True) -> float:
+    """Fraction of the rasterised centreline lying inside the segmentation,
+    ``sum(V_I . l_S) / sum(l_S)`` (Table S13). Voxels outside the lattice are misses."""
+    return _cl_from_skeleton(to_skeleton_graph(graph), frame, labels, exclude_invented)
 
 
 # ------------------------------------------------------------------ image terms
@@ -281,19 +258,13 @@ def image_terms(volume, spacing_um, *, tree_chi: bool = False,
                 connectivity: int = 3, labels=None, component=None) -> ImageTerms:
     """``V``, ``cc`` and ``chi_classical`` of a decoded binary volume.
 
-    ``connectivity=3`` is 26-connectivity, which is what the paper specifies for ``cc``.
-    The Euler number is taken on the **largest component alone**, per Table S13; on the
-    whole volume it would be dominated by however many specks of debris the
-    segmentation left behind.
-
-    `labels` and `component` score one already-labelled component instead of
-    relabelling and taking the biggest -- the per-tree path, where "largest" is the
-    wrong question because each tree is scored on its own terms.
+    26-connectivity, and the Euler number of the **largest component alone**, per
+    Table S13 (computed by the shared core). `labels` and `component` score one
+    already-labelled component instead -- the per-tree path.
     """
-    from skimage.measure import euler_number, label
+    from skimage.measure import euler_number
 
     t0 = time.time()
-    binary = np.asarray(volume) > 0
     sp = np.asarray(spacing_um, dtype=np.float64)
     voxel_volume = float(sp[0] * sp[1] * sp[2])
 
@@ -311,29 +282,56 @@ def image_terms(volume, spacing_um, *, tree_chi: bool = False,
             seconds=time.time() - t0,
         )
 
+    binary = np.asarray(volume) > 0
     n_vox = int(np.count_nonzero(binary))
-    labelled = label(binary, connectivity=connectivity)
-    n_cc = int(labelled.max())
-    if n_cc == 0:
+    if n_vox == 0:
         return ImageTerms(0.0, 0, 0, 0, tree_chi, time.time() - t0)
-
-    counts = np.bincount(labelled.ravel())
-    counts[0] = 0
-    biggest = int(np.argmax(counts))
-    chi = int(euler_number(labelled == biggest, connectivity=connectivity))
-
+    m = core.binary_measures(binary, sp)
     return ImageTerms(
-        volume_um3=n_vox * voxel_volume,
-        components=n_cc,
-        euler_classical=chi,
+        volume_um3=m["volume"],
+        components=m["n_components"],
+        euler_classical=m["euler_classical"],
         voxel_count=n_vox,
         tree_chi=tree_chi,
         seconds=time.time() - t0,
     )
 
 
-def super_metric_per_tree(graph, frame, labels_zyx, parts, *, bb_threshold: float = 900.0,
-                          tree_chi: bool = True, verbose: bool = False) -> dict:
+class ReferenceBifurcations(np.ndarray):
+    """``(n, 3)`` reference bifurcation coordinates in um, carrying ``radius_um``.
+
+    A plain array everywhere it is used as one; the radius (the mask's distance map
+    at each point) is what the radius-based match tolerance needs.
+    """
+
+    radius_um: np.ndarray | None = None
+
+    def __array_finalize__(self, obj):
+        if obj is not None:
+            self.radius_um = getattr(obj, "radius_um", None)
+
+
+def reference_bifurcations(volume, frame, *, stride: int = 1) -> ReferenceBifurcations:
+    """Bifurcation points of the segmentation's own skeleton, in um ``(x, y, z)``.
+
+    The paper annotates these by hand in a subvolume. Automating it from the mask keeps
+    the gold standard the binary image and makes a parameter sweep runnable without a
+    day of annotation first -- at the cost of inheriting Lee thinning's own errors,
+    which is why ``B`` is the softly weighted term.
+    """
+    voxel_size, origin = _frame_geometry(frame)
+    voxel_size = voxel_size * max(int(stride), 1)
+    binary = np.asarray(volume) > 0
+    pts = core.auto_reference_bifurcations(binary, voxel_size, origin)
+    out = np.asarray(pts, dtype=np.float64).reshape(-1, 3).view(ReferenceBifurcations)
+    radius = core.local_radius(binary, out, voxel_size, origin)
+    out.radius_um = np.maximum(radius, voxel_size.min())
+    return out
+
+
+def super_metric_per_tree(graph, frame, labels_zyx, parts, *, bb_threshold: float | None = None,
+                          tree_chi: bool = True, verbose: bool = False,
+                          options: SuperMetricOptions | None = None) -> dict:
     """``{tree index: SuperMetric}`` -- each tree scored against its own component.
 
     The default :func:`super_metric` measures ``chi`` on the largest component alone,
@@ -342,15 +340,9 @@ def super_metric_per_tree(graph, frame, labels_zyx, parts, *, bb_threshold: floa
     optimising ``M_S`` is partly blind to half the anatomy. Here each tree is the whole
     of its own gold standard.
 
-    **The numbers are not comparable with the whole-graph ones**, and not only because
-    they are per tree. ``cc`` in particular becomes ``|1 - cc_s| / 1``, so a tree that
-    skeletonised into three fragments scores 2.0 where the same fragmentation against
-    a global count of hundreds was a small ratio. That is a harsher and arguably
-    truer reading, which is exactly why it is opt-in.
-
-    `labels_zyx` is the connected-component labelling the parts came from -- the
-    ``stats.labels`` of :func:`~.components.split_components` -- at the same
-    resolution as `frame`.
+    **The numbers are not comparable with the whole-graph ones**: ``cc`` becomes
+    ``|1 - cc_s| / 1``, so a tree that skeletonised into three fragments scores 2.0.
+    That is a harsher and arguably truer reading, which is why it is opt-in.
     """
     from .components import subgraph_by_tree
 
@@ -368,7 +360,7 @@ def super_metric_per_tree(graph, frame, labels_zyx, parts, *, bb_threshold: floa
         image = image_terms(mask, frame.seg_spacing, tree_chi=tree_chi)
         refs = reference_bifurcations(mask, frame, stride=1)
         out[part.index] = super_metric(sub, frame, mask, image, refs,
-                                       bb_threshold=bb_threshold)
+                                       bb_threshold=bb_threshold, options=options)
         del mask
     return out
 
@@ -378,11 +370,11 @@ def aggregate(per_tree: dict, parts=None, *, objective: str = "weighted") -> flo
 
     ``weighted`` -- by voxel count -- is the default because the alternatives both
     mislead: an unweighted ``mean`` lets a 3000-voxel fragment outvote the left main,
-    and a plain sum rescales with the number of trees, so a sweep on one mask could
-    not be compared with a sweep on another.
+    and a plain sum rescales with the number of trees. A tree whose score is
+    infinite makes the aggregate infinite; a NaN (unscored) tree is skipped.
     """
     totals = {i: m.total for i, m in per_tree.items()}
-    good = {i: t for i, t in totals.items() if np.isfinite(t)}
+    good = {i: t for i, t in totals.items() if not np.isnan(t)}
     if not good:
         return float("nan")
     if objective == "mean":
@@ -393,28 +385,6 @@ def aggregate(per_tree: dict, parts=None, *, objective: str = "weighted") -> flo
     w = np.array([weights.get(i, 1.0) for i in good], dtype=np.float64)
     v = np.array(list(good.values()), dtype=np.float64)
     return float(np.sum(w * v) / np.sum(w)) if np.sum(w) > 0 else float(np.mean(v))
-
-
-def reference_bifurcations(volume, frame, *, stride: int = 1) -> np.ndarray:
-    """Bifurcation points of the segmentation's own skeleton, in um ``(x, y, z)``.
-
-    The paper annotates these by hand in a subvolume. Automating it from the mask keeps
-    the gold standard the binary image, as intended, and makes a parameter sweep
-    runnable without a day of annotation first -- at the cost of inheriting Lee
-    thinning's own errors, which is why ``B`` is the softly weighted term.
-
-    Delegates to ``skeleton_analysis``'s tested implementation, which crops to the
-    non-zero bounding box, finds voxels with >= 3 skeleton neighbours, and clusters
-    them so one anatomical branch point yields one coordinate rather than a blob.
-    """
-    from ._deps import ensure_skeleton_analysis
-    from .lattice import LatticeView
-
-    ensure_skeleton_analysis()
-    from skeleton_analysis.optimisation.volume_metrics import skeleton_junction_points
-
-    view = LatticeView.from_frame(np.asarray(volume), frame, stride=stride)
-    return np.asarray(skeleton_junction_points(view), dtype=np.float64).reshape(-1, 3)
 
 
 # ------------------------------------------------------------------ the metric
@@ -437,18 +407,25 @@ class SuperMetric:
     bifurcation_dice: float = float("nan")
     dice_detail: dict = field(default_factory=dict)
     image: ImageTerms | None = None
+    options: SuperMetricOptions = CORONARY
     seconds: float = 0.0
 
     @property
     def total(self) -> float:
-        terms = [self.volume, self.components, self.euler, self.cl, self.bifurcation]
-        good = [t for t in terms if np.isfinite(t)]
-        return float(np.sum(good)) if good else float("nan")
+        """Sum of the terms. A NaN term (not applicable) is dropped; an infinite
+        one -- cl or B of zero -- makes the total infinite, as the paper intends."""
+        return core.combine_terms({"V": self.volume, "cc": self.components, "chi": self.euler,
+                                   "cl": self.cl, "B": self.bifurcation})
+
+    @property
+    def paper_comparable(self) -> bool:
+        return self.options.paper_comparable and not (self.image and self.image.tree_chi)
 
     def describe(self) -> str:
         d = self.dice_detail
         lines = [
-            f"M_S = {self.total:.3f}",
+            f"M_S = {self.total:.3f}"
+            + ("" if self.paper_comparable else "   (options differ from the paper)"),
             f"  V   {self.volume:8.3f}   graph {self.graph_volume_um3 / 1e9:.3f} mm^3"
             + (f" vs image {self.image.volume_um3 / 1e9:.3f} mm^3" if self.image else ""),
             f"  cc  {self.components:8.3f}   graph {self.graph_components}"
@@ -458,7 +435,8 @@ class SuperMetric:
             + (" (tree reference)" if self.image and self.image.tree_chi else ""),
             f"  cl  {self.cl:8.3f}   sensitivity {self.cl_sensitivity:.4f}",
             f"  B   {self.bifurcation:8.3f}   dice {self.bifurcation_dice:.3f}"
-            + (f" (tp {d['tp']}, fp {d['fp']}, fn {d['fn']})" if d else ""),
+            + (f" (tp {d['tp']}, fp {d['fp']} [duplicate {d['fp_duplicate']}, isolated "
+               f"{d['fp_isolated']}], fn {d['fn']})" if d else ""),
             f"  ({self.seconds:.1f}s)",
         ]
         return "\n".join(lines)
@@ -478,11 +456,20 @@ class SuperMetric:
         )
 
 
-def _relative(image_value: float, graph_value: float) -> float:
-    """``|f_I - f_S| / f_I``, or NaN when the reference is zero."""
-    if not np.isfinite(image_value) or image_value == 0:
-        return float("nan")
-    return float(abs(image_value - graph_value) / abs(image_value))
+def _tolerances(refs, labels, frame, options: SuperMetricOptions) -> np.ndarray:
+    """Match tolerance per reference bifurcation, in um."""
+    if options.tolerance == "fixed":
+        return np.full(len(refs), float(options.tolerance_value))
+    radius = getattr(refs, "radius_um", None)
+    if radius is None or len(radius) != len(refs):
+        if not isinstance(labels, np.ndarray):
+            raise ValueError("radius-based tolerance needs the reference radii: build "
+                             "ref_bifurcations with reference_bifurcations(), or pass a "
+                             "decoded mask, or use a fixed bb_threshold")
+        voxel_size, origin = _frame_geometry(frame)
+        radius = np.maximum(core.local_radius(labels > 0, refs, voxel_size, origin),
+                            voxel_size.min())
+    return core.bifurcation_tolerance(radius, options)
 
 
 def super_metric(
@@ -492,71 +479,53 @@ def super_metric(
     image: ImageTerms,
     ref_bifurcations,
     *,
-    bb_threshold: float = 900.0,
+    bb_threshold: float | None = None,
+    options: SuperMetricOptions | None = None,
 ) -> SuperMetric:
     """Score one skeleton against the binary image it came from.
 
     `image` and `ref_bifurcations` are computed once per segmentation
     (:func:`image_terms`, :func:`reference_bifurcations`) and reused across every
-    candidate and every sweep sample -- they are the expensive half, and they do not
-    depend on the skeleton.
+    candidate and every sweep sample. `options` defaults to ``CORONARY``; a
+    `bb_threshold` (um) swaps the radius-based match tolerance for a fixed one.
+    The chi reference is ``image.chi`` (set by ``image_terms(tree_chi=...)``).
     """
-    from ._deps import ensure_skeleton_analysis
-
     t0 = time.time()
-    ensure_skeleton_analysis()
-    from skeleton_analysis.optimisation.meta_metric import bifurcation_dice_points
+    options = options_for("coronary") if options is None else options
+    if bb_threshold is not None:
+        options = SuperMetricOptions(**{**asdict(options), "tolerance": "fixed",
+                                        "tolerance_value": float(bb_threshold)})
+    excl = options.exclude_invalid_points
 
-    v_s = graph_volume(graph)
-    cc_s = graph_components(graph)
+    sg = to_skeleton_graph(graph)
+    v_s = sg.volume(excl)
+    cc_s = sg.n_components()
     chi_class_s = graph_euler_classical(graph)
-    cl_s = cl_sensitivity(graph, frame, labels)
+    cl_s = _cl_from_skeleton(sg, frame, labels, excl)
 
-    cand = np.array(
-        [graph.nodes[n][:3] for n in graph.nodes if graph.degree(n) >= 3],
-        dtype=np.float64,
-    ).reshape(-1, 3)
-    dice = bifurcation_dice_points(
-        cand, np.asarray(ref_bifurcations, dtype=np.float64).reshape(-1, 3),
-        threshold=bb_threshold,
-    )
-    b_s = float(dice.dice)
-
-    # w_cl = 1/cl^3 and w_B = 1/B^2 applied to |1 - x|, exactly as Eq. 10. Both blow up
-    # as the measure falls away from 1, which is the intent: it is what rejects a
-    # spatially wrong skeleton however good its bulk statistics look.
-    cl_term = (
-        abs(1.0 - cl_s) / cl_s ** 3 if np.isfinite(cl_s) and cl_s > 0 else float("inf")
-    )
-
-    # A Dice of zero means the skeleton put its branch points somewhere else entirely,
-    # which is infinitely bad. A Dice that is *undefined* -- neither the skeleton nor
-    # the mask has a single bifurcation, as in a lone unbranched tube -- means the term
-    # does not apply, and NaN drops it from the total rather than condemning the
-    # candidate. The paper takes the same line, using only the keys "present in
-    # reference with a non-zero value".
-    if dice.n_candidate == 0 and dice.n_reference == 0:
-        b_term = float("nan")
-    elif not np.isfinite(b_s) or b_s <= 0:
-        b_term = float("inf")
-    else:
-        b_term = abs(1.0 - b_s) / b_s ** 2
+    refs = np.asarray(ref_bifurcations, dtype=np.float64).reshape(-1, 3)
+    tol = _tolerances(ref_bifurcations, labels, frame, options)
+    dice = core.match_bifurcations(sg.bifurcations(), refs, tol, None, options.matching)
 
     return SuperMetric(
-        volume=_relative(image.volume_um3, v_s),
-        components=_relative(image.components, cc_s),
-        euler=_relative(image.chi, local_euler(chi_class_s)),
-        cl=cl_term,
-        bifurcation=b_term,
+        volume=core.relative_term(image.volume_um3, v_s),
+        components=core.relative_term(image.components, cc_s),
+        euler=core.relative_term(image.chi, local_euler(chi_class_s)),
+        cl=core.overlap_term(cl_s, 3) if np.isfinite(cl_s) else float("inf"),
+        # NaN Dice (no bifurcation on either side, e.g. a lone tube) = not applicable.
+        bifurcation=core.overlap_term(dice.dice, 2),
         graph_volume_um3=v_s,
         graph_components=cc_s,
         graph_euler_classical=chi_class_s,
         cl_sensitivity=cl_s,
-        bifurcation_dice=b_s,
+        bifurcation_dice=dice.dice,
         dice_detail={
-            "tp": int(dice.tp), "fp": int(dice.fp), "fn": int(dice.fn),
-            "n_candidate": int(dice.n_candidate), "n_reference": int(dice.n_reference),
+            "tp": dice.tp, "fp": dice.fp, "fn": dice.fn,
+            "fp_duplicate": dice.fp_duplicate, "fp_isolated": dice.fp_isolated,
+            "n_candidate": dice.tp + dice.fp, "n_reference": len(refs),
+            "matching": options.matching,
         },
         image=image,
+        options=options,
         seconds=time.time() - t0,
     )

@@ -73,7 +73,8 @@ src/skeleton_analysis/
     viz3d.py          optional interactive 3-D QC viewer (PyVista, [viz3d])
   optimisation/
     meta_metric.py    bifurcation points + bifurcation Dice + meta-metric formula
-    volume_metrics.py centreline sensitivity, skeleton junctions, morphometrics, super_metric
+    volume_metrics.py centreline sensitivity, skeleton junctions, morphometrics, super_metric (legacy)
+    supermetric.py    the paper's super metric (Eq. 10) with option presets -- use this
     cl_dice.py        clDice family (cleaned VesselVio-era script)
   utils/
     merge.py          merge two spatial graphs (dedupe shared vertices)
@@ -234,6 +235,11 @@ from the graph — the VesselVio `feature_extraction.py` definitions — so volu
 to the corrections. Amira's fields are still read and reported as cross-checks.
 
 ### 4.10 Morphometrics + super-metric (`optimisation.volume_metrics`)
+
+> **Superseded.** The paper's super metric (Walsh et al. 2024, Eq. 10) is
+> `optimisation.supermetric`, with `PAPER` / `CORONARY` option presets; it is the one
+> implementation the toolkit uses. `volume_metrics.super_metric` and `meta_metric.meta_metric`
+> below are the legacy port of the MATLAB formula and are deprecated (they warn when called).
 `region_morphometrics` is the Python replacement for the Fiji/MorphoLibJ macro: connected-components
 count (`skimage.measure.label`, 26-conn), Euler number (`skimage.measure.euler_number`), volume
 (foreground voxels × voxel³), surface area (marching-cubes mesh area ≈ the Crofton estimate).
