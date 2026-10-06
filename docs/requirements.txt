@@ -1,2 +1,3 @@
 # Read the Docs build only (see .readthedocs.yaml); not needed to use the toolkit.
 mkdocs==1.6.1
+pymdown-extensions==10.12  # GitHub-style heading slugs (mkdocs.yml toc.slugify)

@@ -337,7 +337,7 @@ A rendered Mermaid version of this flow (plus the module dependency graph and da
 
 ## Configuration
 
-All tunable behaviour lives in [config.py](config.py), which is the **single source of truth**:
+All tunable behaviour lives in [config.py](src/coronary_sdf/config.py), which is the **single source of truth**:
 
 - Module-level constants define backward-compatible defaults.
 - Every constant carries a **`# Consumed by:`** comment naming the function(s) that read it;
@@ -587,4 +587,4 @@ not part of the production pipeline.
   dataclass model, and per-module API maps (Mermaid).
 - **[epicardial_annotation_README.md](epicardial_annotation_README.md)** — full guide to the
   annotation + pruning-series workflow.
-- **[config.py](config.py)** — every knob, each with a `# Consumed by:` pointer to its consumers.
+- **[config.py](src/coronary_sdf/config.py)** — every knob, each with a `# Consumed by:` pointer to its consumers.

@@ -120,10 +120,22 @@ def test_teasar_traces_a_tube_or_says_why_it_cannot(frame, tube):
 
     The ImportError branch is kept rather than deleted: it is the path a fresh checkout
     takes, and it is the only thing asserting the message tells you what to install.
+    It applies only when kimimaro is genuinely absent. Installed but unimportable --
+    the osteoid 0.7.1 wheel lacks a module its own skeleton.py imports -- means a
+    broken pin, and passing through this branch hid exactly that.
     """
+    import importlib.metadata
+
     try:
         import kimimaro  # noqa: F401
-    except ImportError:
+    except ImportError as exc:
+        try:
+            installed = importlib.metadata.version("kimimaro")
+        except importlib.metadata.PackageNotFoundError:
+            installed = None
+        if installed is not None:
+            pytest.fail(f"kimimaro {installed} is installed but does not import ({exc}); "
+                        "check the pinned osteoid in hipct_seg_debug's pyproject.toml")
         with pytest.raises(ImportError, match="pip install kimimaro"):
             sk.skeletonise("teasar", tube, frame)
         return

@@ -856,7 +856,7 @@ shared with the read-only auditing path, and `lazy mask alignment` and
 
 **`ModuleNotFoundError: No module named 'hipct_seg_debug'`** — the package is not
 installed; run `python -m pip install -e .` in the checkout. See
-[Prerequisites](#run-from-f).
+[Prerequisites](#prerequisites).
 
 **`ImportError: cannot find the 'coronary_sdf' package`** — set `HIPCT_CORONARY_SDF` to
 the directory containing it.
