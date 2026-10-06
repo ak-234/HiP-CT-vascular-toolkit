@@ -25,6 +25,87 @@ def test_line_containment_checks_between_points():
     assert cr.bad_edges(points, sampler, frame).tolist() == [True]
 
 
+def test_spline_displacement_preserves_gap_anchors_and_descends():
+    from hipct_seg_debug.edit.junction_refine import fit_objective
+    s = np.linspace(0, 500, 81)
+    x = np.c_[s, 8*np.sin(s/17)+3*np.cos(s/3), np.zeros(len(s))]
+    target = x.copy()
+    target[:, 1] = 0
+    weights = np.ones(len(x))
+    pinned = [23, 24, 25]
+    result = cr.spline_fit(x, target, weights, 35., 2., fixed_points=pinned)
+    np.testing.assert_array_equal(result[[0, *pinned, 80]], x[[0, *pinned, 80]])
+    assert np.linalg.norm(result-x) > 1
+    assert fit_objective(result, target, weights, 35., x, 2., .1) < fit_objective(
+        x, target, weights, 35., x, 2., .1)
+
+
+def test_preexisting_gap_movement_reports_constraint_not_convergence():
+    frame = make_frame((5, 5, 12))
+    mask = np.ones((5, 5, 12), dtype=np.uint8)
+    mask[:, :, 5] = 0
+    x = frame.seg_to_um([[2, 2, 2], [4, 2, 2], [6, 2, 2], [9, 2, 2]])
+    changed = x.copy()
+    changed[1, 1] += .01
+    assert cr.movement_rejection(x, changed, _PlaneSampler(mask, frame), frame) == 'preexisting_gap_anchor_moved'
+
+
+@pytest.mark.parametrize('unsupported', [True, False])
+def test_junction_and_approaches_move_together_or_remain_unresolved(monkeypatch, unsupported):
+    frame = make_frame((70, 110, 110))
+    graph = graph_from([(500, 530, 300), (100, 500, 300), (900, 500, 300), (500, 900, 300)],
+                       [(0, 1, 25, 50.), (0, 2, 25, 50.), (0, 3, 25, 50.)])
+    before = {sid: graph.coords(sid).copy() for sid in graph.segment_ids()}
+    def observations(g, sid, *args, **kwargs):
+        x = g.coords(sid).copy()
+        if sid == 2 and unsupported:
+            return x, np.zeros(len(x)), [], []
+        x[:, 1] = before[sid][:, 1]-30*np.linspace(1, 0, len(x))
+        return x, np.ones(len(x)), list(range(len(x))), [50.]*len(x)
+    monkeypatch.setattr(cr, '_targets', observations)
+    report = cr.refine(graph, frame, np.ones((70, 110, 110), dtype='uint8'),
+                       method='centroid-coherent', max_iterations=2)
+    if not unsupported:
+        assert np.linalg.norm(graph.coords(0)[0]-before[0][0]) > 1.
+        for sid in before:
+            np.testing.assert_array_equal(graph.coords(sid)[0], graph.coords(0)[0])
+            np.testing.assert_array_equal(graph.coords(sid)[-1], before[sid][-1])
+            np.testing.assert_array_equal(graph.radii(sid), np.full(25, 50.))
+        return
+    assert not report.converged
+    assert report.neighbourhoods[0]['status'] == 'insufficient_support'
+    for sid, old in before.items():
+        np.testing.assert_array_equal(graph.coords(sid), old)
+        assert report.segments[sid]['blocked_reason'] == 'junction_fit_unresolved'
+
+
+def test_compressed_section_processes_match_serial_fitting(tmp_path):
+    import copy
+    from hipct_seg_debug import rle_write, amira, rle
+    shape = (20, 80, 100)
+    frame = make_frame(shape)
+    mask = np.maximum(slit(shape, 7, 2, 2, 98, cy=20, cz=10),
+                      slit(shape, 7, 2, 2, 98, cy=60, cz=10))
+    xyz = frame.seg_to_um([[5, 24, 10], [95, 24, 10], [5, 64, 10], [95, 64, 10]])
+    graph = graph_from(xyz, [(0, 1, 31, 30.), (2, 3, 31, 30.)])
+    other = copy.deepcopy(graph)
+    path = tmp_path/'slits.am'
+    rle_write.write_lattice(path, mask, frame.seg_bbox_um)
+    header = amira.read_lattice_header(path)
+    labels = rle.open_lattice(path, header.fields['Labels'], header.dims, cache_dir=tmp_path/'cache')
+    serial = cr.refine(graph, frame, labels, method='centroid-coherent',
+                       max_iterations=2, max_samples=6, workers=1)
+    progress, checkpoints = [], []
+    parallel = cr.refine(other, frame, labels, method='centroid-coherent',
+                         max_iterations=2, max_samples=6, workers=2,
+                         section_progress=progress.append, checkpoint=checkpoints.append)
+    for sid in graph.segment_ids():
+        np.testing.assert_allclose(other.coords(sid), graph.coords(sid), atol=1e-9)
+    assert serial.history == parallel.history
+    assert len(progress) == 2*parallel.iterations
+    assert len(checkpoints) == parallel.iterations
+
+
 def test_movement_cannot_jump_into_another_lumen():
     frame = make_frame((5, 8, 10))
     mask = np.ones((5, 8, 10), dtype=np.uint8)

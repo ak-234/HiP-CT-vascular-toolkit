@@ -34,8 +34,29 @@ def fixture():
     return graph, frame, mask
 
 
+def test_provisional_batches_reuse_indexes_without_changing_measurements(monkeypatch):
+    from hipct_seg_debug.edit import section_validation
+    graph, frame, labels = fixture()
+    expected = [rp.measure_radii(graph, frame, labels, _raw_only=True,
+                _segment_ids=[sid], section_filter=True) for sid in [0, 1]]
+    constructor, calls = section_validation.SectionContext, []
+    def counted(g):
+        calls.append(1)
+        return constructor(g)
+    monkeypatch.setattr(section_validation, 'SectionContext', counted)
+    cache = {}
+    for sid, reference in zip([0, 1], expected):
+        actual = rp.measure_radii(graph, frame, labels, _raw_only=True,
+                    _segment_ids=[sid], section_filter=True, _worker_cache=cache)
+        assert_same(reference['result'], actual['result'])
+        for key in ('measured', 'source', 'reject', 'grew', 'modes', 'old', 'arc', 'invented'):
+            np.testing.assert_array_equal(actual[key][sid], reference[key][sid])
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("options", [
     {},
+    dict(section_filter=True),
     dict(branch_aware=False, gate_voxels=9., perimeter_correction=False,
          fallback_policy="drop", fallback_taper=True, max_radius_factor=1.5),
     dict(junction_flare="parent", root_edges=[0], bifurcation_tapers=True,
@@ -74,6 +95,19 @@ def test_parallel_preserves_nonadjacent_branch_ownership():
     serial = rp.measure_radii(graph, frame, mask)
     assert sum((v == rp.OWNED_PLANE).sum() for v in serial.resolution_mode.values()) > 0
     assert_same(serial, rp.measure_radii(graph, frame, mask, workers=2))
+
+
+@pytest.mark.parametrize('shared_filter', [False, True])
+def test_regional_measurement_keeps_global_junction_context_without_missing_segment_lookup(shared_filter):
+    graph, frame, mask = fixture()
+    before = dict(graph.points)
+    result = rp.measure_radii(graph, frame, mask, _segment_ids=[0], section_filter=shared_filter)
+    assert set(result.radii) == {0}
+    assert graph.points == before
+    if shared_filter:
+        assert not np.isin(result.resolution_mode[0],
+                          [rp.BIF_PARENT, rp.BIF_DAUGHTER, rp.BIF_CONTINUATION]).any()
+        assert result.section_rejection_counts[0].shape == (len(graph.coords(0)), 5)
 
 
 @pytest.mark.parametrize("workers", [0, -1, 1.5, True])

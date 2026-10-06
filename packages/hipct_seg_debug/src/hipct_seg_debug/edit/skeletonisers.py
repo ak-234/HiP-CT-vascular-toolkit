@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-ALGORITHMS = ("lee", "teasar", "amira")
+ALGORITHMS = ("lee", "teasar", "amira", "jin-mcp", "jin-mcp-centroid", "vmtk")
 
 # TEASAR's two shape parameters, named after Amira Centerline Tree's `slope` and
 # `zeroVal` because they play the same role: how far from the boundary a voxel has to
@@ -196,6 +196,78 @@ def _lee(volume, frame, spacing, *, origin_um=None, **params) -> tuple:
     return result.triple, f"{result.n_skeleton_voxels:,} skeleton voxels"
 
 
+def _jin_mcp(volume, frame, spacing, *, origin_um=None, root_zyx=None,
+             max_voxels=2_000_000, report_path=None, report_dir=None, **params) -> tuple:
+    """Binary-label adapter for Jin's fuzzy-object algorithm (opt-in)."""
+    import json
+    from pathlib import Path
+
+    from .jin_mcp import extract
+
+    if not np.isfinite(spacing).all() or np.any(spacing <= 0) or not np.allclose(spacing, spacing[0], rtol=1e-6):
+        raise ValueError('Jin MCP currently requires isotropic voxel spacing')
+    if np.asarray(volume).size > max_voxels:
+        raise ValueError('Jin MCP input exceeds max_voxels; use --roi-zyx before decoding')
+    result = extract(np.asarray(volume) > 0, root_zyx=root_zyx, max_voxels=max_voxels)
+    origin = frame.seg_origin if origin_um is None else origin_um
+    result.report.update(origin_xyz_um=list(map(float, origin)), spacing_xyz_um=list(map(float, spacing)),
+                         shape_zyx=list(volume.shape), membership='binary nonzero labels')
+    triple = edges_to_triple(result.coordinates_zyx[:, ::-1] * spacing,
+                            result.edges, result.fdt * spacing[0], origin_um=origin)
+    if not len(result.edges):
+        xyz = result.coordinates_zyx[0, ::-1] * spacing + origin
+        triple.nodes[0] = (*map(float, xyz), 0)
+    if report_dir is not None:
+        import hashlib
+        digest = hashlib.sha256(np.packbits(np.asarray(volume) > 0).tobytes()
+                                + np.asarray(origin, dtype=np.float64).tobytes()).hexdigest()[:16]
+        Path(report_dir).mkdir(parents=True, exist_ok=True)
+        report_path = Path(report_dir) / f'component_{digest}.json'
+    if report_path is not None:
+        # Intended for a single ROI. Per-component callers should use separate paths.
+        Path(report_path).write_text(json.dumps(result.report, indent=2), encoding='utf-8')
+    return triple, (f'Jin MCP experimental: {len(result.report["rounds"])} rounds, '
+                    f'{result.report["unmarked_voxels"]} unmarked voxels; '
+                    'new IDs; FDT thickness placeholders require perimeter remeasurement')
+
+
+def _jin_mcp_centroid(volume, frame, spacing, *, origin_um=None, refine_iterations=5,
+                      report_dir=None, **params):
+    """Jin extraction followed by constrained centroid/curvature fitting.
+
+    A deliberately named hybrid: the published shortest-path cost is unchanged.
+    This does not prune the extra branches a medial sheet may have generated.
+    """
+    import hashlib
+    import json
+    from pathlib import Path
+    from dataclasses import replace
+    from .centreline_refine import refine
+    from .graphmodel import EditableGraph
+    triple, detail = _jin_mcp(volume, frame, spacing, origin_um=origin_um,
+                              report_dir=report_dir, **params)
+    if not triple.segments:
+        return triple, detail + '; no curve to refine'
+    origin = frame.seg_origin if origin_um is None else origin_um
+    local_frame = replace(frame, seg_origin=np.asarray(origin),
+                          seg_dims=np.array(volume.shape[::-1]), seg_spacing=np.asarray(spacing))
+    graph = EditableGraph(triple)
+    report = refine(graph, local_frame, volume, method='dfs-centroid-shape',
+                    max_iterations=refine_iterations, strength=.01).to_dict()
+    if report_dir is not None:
+        digest = hashlib.sha256(np.packbits(np.asarray(volume) > 0).tobytes()
+                                + np.asarray(origin, dtype=np.float64).tobytes()).hexdigest()[:16]
+        Path(report_dir, f'component_{digest}_refinement.json').write_text(
+            json.dumps(report, indent=2), encoding='utf-8')
+    return triple, detail + f'; centroid/curvature hybrid converged={report["converged"]}'
+
+
+def _vmtk(volume, frame, spacing, *, origin_um=None, source_points=None, target_points=None, **params):
+    from .vmtk_baseline import extract
+    return extract(volume, spacing, frame.seg_origin if origin_um is None else origin_um,
+                   source_points, target_points)
+
+
 def _teasar(volume, frame, spacing, *, scale: float = TEASAR_SCALE,
             const_um: float = TEASAR_CONST_UM, dust_threshold: int = 100,
             fix_branching: bool = True, origin_um=None, **params) -> tuple:
@@ -286,7 +358,8 @@ def _amira(volume, frame, spacing, *, graph: str | None = None, origin_um=None,
     return triple, f"ingested {Path(graph).name}"
 
 
-_BACKENDS = {"lee": _lee, "teasar": _teasar, "amira": _amira}
+_BACKENDS = {"lee": _lee, "teasar": _teasar, "amira": _amira, "jin-mcp": _jin_mcp,
+             "jin-mcp-centroid": _jin_mcp_centroid, "vmtk": _vmtk}
 
 
 def skeletonise(name: str, volume, frame, **params) -> SkeletonCandidate:
