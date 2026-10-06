@@ -148,11 +148,11 @@ def test_later_daughter_fit_keeps_previous_path_fixed_outside_junction(monkeypat
               sampler, frame, .1, {0, 2, 3})
     assert len(snapshots) == 2
     assert all(r['status'] in ('moving', 'stationary') for _, r in snapshots)
+    # The junction the longest path placed is fixed for the daughter, so the earlier
+    # path is not released at all -- not even inside a bounded neighbourhood.
+    assert set(snapshots[1][1]['spans']) == {2}
     for sid in (0, 1):
-        lo, hi = snapshots[1][1]['spans'][sid]
-        ids = np.r_[np.arange(lo), np.arange(hi+1, len(g.coords(sid)))]
-        assert len(ids) > 4
-        np.testing.assert_array_equal(snapshots[0][0][sid][ids], g.coords(sid)[ids])
+        np.testing.assert_array_equal(snapshots[0][0][sid], g.coords(sid))
 
 
 def test_two_point_link_is_supported_by_sections_on_both_sides(monkeypatch):
@@ -261,3 +261,185 @@ def test_repeated_failed_regional_prefix_is_attempted_once(monkeypatch):
         frame, .1, {0, 2, 3}, progress=progress.append)
     assert len(calls) == len(progress) == 1
     assert progress[0]['status'] == 'blocked'
+
+
+def test_failed_run_is_not_retried_after_an_unrelated_accepted_fit(monkeypatch):
+    # Paths by length: 0-1-2-3 (segments 0,1 selected; blocked), 0-5 (segment 4;
+    # accepted), then 0-1-2-4, whose selected run is 0,1 again with unchanged inputs.
+    # A global revision counter retried it because segment 4 succeeded in between.
+    from hipct_seg_debug.edit import dfs_refine
+    from hipct_seg_debug.crosssection import _PlaneSampler
+    g = graph_from([(100, 500, 300), (300, 500, 300), (500, 500, 300), (1500, 500, 300),
+                    (700, 600, 300), (100, 1400, 300)],
+                   [(0, 1, 9, 50.), (1, 2, 9, 50.), (2, 3, 9, 50.), (2, 4, 9, 50.), (0, 5, 9, 50.)])
+    calls = []
+    def fake(graph, movable, spans, *args, **kwargs):
+        calls.append(sorted(spans))
+        status = 'blocked' if 1 in spans else 'moving'
+        return dict(status=status, nodes=sorted(movable), segments=sorted(spans), spans={})
+    monkeypatch.setattr(dfs_refine, 'fit_cluster', fake)
+    selected = [0, 1, 4]
+    obs = {sid: (g.coords(sid), np.ones(9), list(range(9)), [50.]*9) for sid in selected}
+    frame = make_frame((70, 150, 160))
+    paths = root_paths(g, [0])
+    assert [p['terminal'] for p in paths] == [3, 5, 4]
+    rows = dfs_refine.fit_paths(g, paths, selected, obs, {s: np.full(9, 50.) for s in selected},
+                                _PlaneSampler(np.ones((70, 150, 160), dtype='uint8'), frame),
+                                frame, .1, {0, 3, 4, 5})
+    assert [r['status'] for r in rows.values()] == ['blocked', 'moving']
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize('rounds', [0, 4])
+# Near the node the daughter is dragged +x with the node; 3-6 samples out, the
+# bending term pulls it slightly -x. Each case puts background on the dragged side.
+@pytest.mark.parametrize('x, rows, cols, at_node', [
+    (495.001, (58, 64), (0, 50), False), (504.999, (55, 60), (51, 120), True)])
+def test_grazing_side_approach_is_pinned_instead_of_blocking_the_path(monkeypatch, rounds,
+                                                                       x, rows, cols, at_node):
+    # The daughter runs 0.001 um short of a voxel boundary with background beyond,
+    # the 3041 situation: moving it any distance that way leaves the segmentation.
+    from hipct_seg_debug.crosssection import _PlaneSampler
+    from hipct_seg_debug.edit import dfs_refine, junction_cluster
+    monkeypatch.setattr(junction_cluster, 'PIN_ROUNDS', rounds)
+    g = graph_from([(100, 500, 300), (x, 530, 300), (1000, 500, 300), (x, 800, 300)],
+                   [(0, 1, 25, 50.), (1, 2, 31, 50.), (1, 3, 21, 25.)])
+    frame = make_frame((70, 110, 120))
+    mask = np.ones((70, 110, 120), dtype='uint8')
+    mask[:, rows[0]:rows[1], cols[0]:cols[1]] = 0
+    sampler = _PlaneSampler(mask, frame)
+    before = {sid: g.coords(sid).copy() for sid in g.segment_ids()}
+    observations, scales = {}, {}
+    for sid in g.segment_ids():
+        target = g.coords(sid).copy()
+        if sid != 2:
+            target[:, 0] += 20.  # the through path wants its shared node further in +x
+        observations[sid] = target, np.ones(len(target)), list(range(len(target))), [25.]*len(target)
+        scales[sid] = np.full(len(target), 25.)
+    rows = dfs_refine.fit_paths(g, root_paths(g, [0])[:1], g.segment_ids(), observations,
+                                scales, sampler, frame, .1, {0, 2, 3})
+    row = rows[0]
+    if rounds == 0:
+        assert row['status'] == 'blocked' and set(row['blocked_reasons']) == {2}
+        assert 'pinned_points' not in row
+        detail = row['blocked_detail'][2]
+        assert detail['contained_alpha'] is None
+        assert detail['exit_near_moved_node'] == at_node
+        for sid, x in before.items():
+            np.testing.assert_array_equal(g.coords(sid), x)
+        return
+    assert row['status'] == 'moving'
+    pinned = row['pinned_points'][2]
+    np.testing.assert_array_equal(g.coords(2)[pinned], before[2][pinned])
+    if at_node:
+        # Pinning reached the shared node: it is reported, and the node stays put.
+        assert row['pinned_nodes'] == [1]
+        np.testing.assert_array_equal(g.coords(0)[-1], before[0][-1])
+    else:
+        assert set(row['pinned_points']) == {2} and row['pinned_nodes'] == []
+        assert g.coords(0)[-1, 0] > before[0][-1, 0] + 1.
+    for sid in g.segment_ids():
+        assert not cr.bad_edges(g.coords(sid), sampler, frame).any()
+
+
+def test_region_with_an_unsupported_segment_can_still_report_settled_geometry(monkeypatch):
+    # `converged` needs every segment supported, which segment 2 (no sections) never
+    # is; `supported_stable` says the supported rest has stopped moving.
+    g = tree()
+    def sections(graph, sid, *args, **kwargs):
+        x = graph.coords(sid).copy()
+        if sid == 2:
+            return x, np.zeros(len(x)), [], []
+        x[:, 1] = 500.
+        good = list(range(3, len(x)-3))
+        weights = np.zeros(len(x))
+        weights[good] = 1.
+        return x, weights, good, [50.]*len(good)
+    monkeypatch.setattr(cr, '_targets', sections)
+    report = cr.refine(g, make_frame((70, 110, 120)), np.ones((70, 110, 120), dtype='uint8'),
+                       method='dfs-centroid', root_nodes=[0], max_iterations=12)
+    assert not report.converged
+    assert report.unsupported_segments == [2]
+    assert report.supported_stable
+    last = report.history[-1]
+    assert last['supported_max_move_um'] < 1. and last['unsupported_segments'] == 1
+    assert {'median_move_um', 'peak_segment', 'pinned_points'} <= set(last)
+
+
+def test_later_path_attaches_to_a_junction_placed_by_an_earlier_fit(monkeypatch):
+    # Region 318: two fits both treated node 636 as movable and pulled it to different
+    # places every iteration. The daughter path must see node 1 as fixed once the
+    # longest path has placed it.
+    from hipct_seg_debug.edit import dfs_refine
+    from hipct_seg_debug.crosssection import _PlaneSampler
+    g = tree()
+    calls = []
+    def fake(graph, movable, spans, *args, **kwargs):
+        calls.append((sorted(movable), sorted(spans)))
+        return dict(status='moving', nodes=sorted(movable), segments=sorted(spans), spans={})
+    monkeypatch.setattr(dfs_refine, 'fit_cluster', fake)
+    obs = {sid: (g.coords(sid), np.ones(len(g.coords(sid))), list(range(len(g.coords(sid)))),
+                 [50.]*len(g.coords(sid))) for sid in g.segment_ids()}
+    frame = make_frame((70, 110, 120))
+    dfs_refine.fit_paths(g, root_paths(g, [0]), g.segment_ids(), obs,
+                         {s: np.full(len(g.coords(s)), 50.) for s in g.segment_ids()},
+                         _PlaneSampler(np.ones((70, 110, 120), dtype='uint8'), frame),
+                         frame, .1, {0, 2, 3})
+    assert calls[0][0] == [1]           # the longest path moves the junction
+    assert calls[1] == ([], [2])        # the daughter fits only itself, node 1 fixed
+
+
+@pytest.mark.parametrize('rounds', [0, 4])
+def test_partial_step_pins_what_exits_at_the_full_step(monkeypatch, rounds):
+    # Region 318, segment 2699: the contained optimum was ~80 um away, the line search
+    # accepted 1/16..1/128 of it each iteration, and pinning never ran because the
+    # search never failed outright. Here daughter vertex 4 may not move more than
+    # 1 um: half a step passes, the full step does not.
+    from hipct_seg_debug.crosssection import _PlaneSampler
+    from hipct_seg_debug.edit import dfs_refine, junction_cluster
+    monkeypatch.setattr(junction_cluster, 'PIN_ROUNDS', rounds)
+    g = tree()
+    frame = make_frame((70, 110, 120))
+    fixed_point = g.coords(2)[4].copy()
+    def bad_edges(x, sampler, frame):
+        out = np.zeros(len(x)-1, dtype=bool)
+        if len(x) == len(g.coords(2)) and np.allclose(x[-1], g.coords(2)[-1]):
+            if np.linalg.norm(x[4]-fixed_point) > 1.:
+                out[3:5] = True
+        return out
+    def rejection(old, new, sampler, frame, *, original_bad=None):
+        return 'new_segmentation_exit' if bad_edges(new, sampler, frame).any() else None
+    monkeypatch.setattr(cr, 'bad_edges', bad_edges)
+    monkeypatch.setattr(cr, 'movement_rejection', rejection)
+    observations, scales = {}, {}
+    for sid in g.segment_ids():
+        target = g.coords(sid).copy()
+        if sid != 2:
+            target[:, 0] += 60.
+        observations[sid] = target, np.ones(len(target)), list(range(len(target))), [25.]*len(target)
+        scales[sid] = np.full(len(target), 25.)
+    node_before = g.coords(0)[-1].copy()
+    [row] = dfs_refine.fit_paths(g, root_paths(g, [0])[:1], g.segment_ids(), observations, scales,
+                                 _PlaneSampler(np.ones((70, 110, 120), dtype='uint8'), frame),
+                                 frame, .1, {0, 2, 3}).values()
+    assert row['status'] == 'moving'
+    if rounds == 0:
+        assert row['step'] < 1. and 'pinned_points' not in row
+    else:
+        assert row['step'] == 1. and set(row['pinned_points']) == {2}
+        assert 4 in row['pinned_points'][2] and row['pinned_nodes'] == []
+        np.testing.assert_array_equal(g.coords(2)[4], fixed_point)
+    assert np.linalg.norm(g.coords(0)[-1]-node_before) > 1.
+
+
+def test_data_less_segment_borrows_neighbour_calibre_for_the_fit_only():
+    # 905 on region 3612/3655: a spur into a bulge with stored radius 1.67 mm and no
+    # sections dominated the joint fit through calibre**4.
+    g = tree()
+    scale = {0: np.full(25, 50.), 1: np.full(31, 60.), 2: np.full(21, 500.)}
+    fit = cr._fit_calibre(g, [0, 1, 2], scale, measured={0, 1})
+    np.testing.assert_array_equal(fit[2], np.full(21, 55.))
+    np.testing.assert_array_equal(fit[0], scale[0])
+    assert scale[2][0] == 500.  # section sampling keeps the stored scale
+    lonely = cr._fit_calibre(g, [0, 1, 2], scale, measured=set())
+    np.testing.assert_array_equal(lonely[2], scale[2])
