@@ -1,7 +1,10 @@
 # Skeletonisation: algorithms, the super metric, and what this repo does with them
 
 For the experimental Jin et al. minimum-cost-path backend, regional commands,
-tests and the known flattened-lumen limitation, see [JIN_MCP.md](JIN_MCP.md).
+tests and the known flattened-lumen limitation, see [JIN_MCP.md](JIN_MCP.md). For the
+collapse-aware `jin-mgf` variant, the `geodesic-scoop` wave-front backend, the
+`teasar-readme` pipeline, and the phantom benchmark that compares them all against
+TEASAR, see [SKELETON_BENCHMARK.md](SKELETON_BENCHMARK.md).
 
 The methodology of
 
@@ -45,8 +48,8 @@ skeletonisation lose?*
 |---|---|---|---|
 | **Thinning** | iteratively peel voxels without changing topology until one voxel thick | Lee et al. medial-axis thinning; **VesselVio** | **yes** — `skimage.morphology.skeletonize(..., method="lee")` |
 | **Thinning + distance ordering (DTHO)** | peel in order of distance-transform value, which preserves medialness and is *proved* to preserve homology | Pudney, Palágyi; **Amira AutoSkeleton** (parallelised Fouard) | **no** — commercial; reachable only by ingesting an Avizo `.am` |
-| **Minimum-cost path** | shortest-path spanning tree through the volume; produces a **strict tree** | **TEASAR**; Amira **Centerline Tree** | **yes** — `kimimaro` |
-| **Wave-front / vessel scooping** | grow clusters from seeds, take each cluster's centre of mass | Rodriguez, Wu; **MOST** / Vaa3D | **no** |
+| **Minimum-cost path** | shortest-path spanning tree through the volume; produces a **strict tree** | **TEASAR**; Amira **Centerline Tree** | **yes** — `kimimaro` (`teasar`, `teasar-readme`); Jin et al. (`jin-mcp`, `jin-mgf`) |
+| **Wave-front / vessel scooping** | grow clusters from seeds, take each cluster's centre of mass | Rodriguez, Wu; **MOST** / Vaa3D | **yes** — `geodesic-scoop` |
 
 The three stated goals of a skeletonisation are **thinness** (one voxel wide), **medialness**
 (equidistant from the boundaries) and **homology** (same connected components and loops as the
@@ -196,8 +199,9 @@ mask, cluster the junction voxels, take one centroid per cluster. It keeps the g
 binary image, as the paper intends, and makes a sweep runnable without a day of annotation first.
 It inherits Lee thinning's own errors, which is why `B` is the softly weighted term.
 
-**Not implemented:** DTHO/AutoSkeleton and vessel scooping. The first is reachable by ingesting an
-Avizo export as a candidate (`skeletonise-all --algorithms amira`), the second not at all.
+**Not implemented:** DTHO/AutoSkeleton, which is reachable only by ingesting an Avizo export
+as a candidate (`skeletonise-all --algorithms amira`). Vessel scooping is now available as
+`geodesic-scoop`; see [SKELETON_BENCHMARK.md](SKELETON_BENCHMARK.md).
 
 ### Measured on LADAF-2024-28, at stride 1
 
@@ -782,6 +786,128 @@ python -m hipct_seg_debug.edit optimise-skeleton candidate.am \
 python -m hipct_seg_debug.edit optimise-skeleton candidate.am \
     --smoother multiscale --sweep "drift-radius-factor=0.05,0.1,0.25,0.5"
 ```
+
+### 6.3 Guarded mask repair
+
+Two segmentation defects put wrong centrelines into every skeletoniser. Both were
+found on LADAF-2021-17 where a full-tree `jin-mgf` went wrong.
+
+- **A hollow lumen** (around edge 9321). Over a run of slices only the vessel wall is
+  labelled, as a ring, and the dark lumen inside is not. A hollow tube's medial set
+  is a curved sheet, and gives a cloud of spurious branches.
+- **Small enclosed voids** (around edge 7981). These bend the centreline around
+  them.
+
+The plain repairs each have a failure mode:
+- **A closing welds vessels.** It joins two vessels that pass within a few voxels,
+  which makes a false loop or merges two trees.
+- **A slice fill fills loop interiors.** It fills the interior of a vessel loop
+  lying in the slice plane, which turns tissue into lumen.
+
+`repair-mask --guarded` (`edit/mask_repair.py`) proposes regions and tests each one
+before adding it. Regions are applied one at a time, each against the mask plus
+everything already accepted.
+
+**What it proposes:**
+- **Slice fills:** 2D holes along all three axes.
+- **Optionally, closing patches:** `--close-radius`, default 0.
+
+| check | applies to | refuses |
+|---|---|---|
+| Δb0 = 0 and Δb1 ≤ 0, within the region's box + 3 voxels, over all labels | every region | a merge of two local pieces, or a new tunnel |
+| Δb1 = 0 exactly | closing patches and pinholes (≤ 16 voxels) | removing a loop: filling a tight loop's hole, or zipping a hairpin shut |
+| detour: the voxels it joins must already be ≤ 3× + 6 hops apart through the mask | closing patches | zipping two parallel branches together from their junction |
+| 2D hole area ≤ π(1500 µm)² | slice fills | anything larger |
+| enclosed in 3D, *or* capped ≥ 0.8, *or* a sleeve ≥ 0.5, *or* alignment ≥ 0.35 *and* band ratio ≤ 1.0 | slice fills | a loop's or a hairpin's interior |
+
+**The last check.**
+- **Alignment:** a hollow core is a hole in slices *across* its vessel, and runs
+  along those slices' normals. A loop's interior is a hole in slices *in* its own
+  plane, and lies in that plane.
+- **Band ratio:** the ring's thickness divided by the hole's radius. A hollow
+  vessel's wall is thin for its lumen. A tight loop of a thick vessel has a hole
+  that is a short, fat pipe, the same shape as a short core, but its ring is a whole
+  vessel.
+- **Each test alone admits some loop.** The pair was chosen on 246 phantom regions:
+  88 loops and hairpins (tori of radius 4–20 voxels, tubes of 2–6, tilted 0–30°;
+  hairpins with 2–8 voxel gaps, rotated up to 60°) and 158 straight, oblique, short and
+  curved cores.
+  - **Loops:** none passes both tests. Every loop that passes the band test has
+    alignment ≤ 0.04, and every one that passes alignment has band ≥ 1.28.
+  - **Cores:** run end to end through `repair_volume`, at closing radius 0, 1 and 2,
+    no loop's b1 changes, and 64 of 78 cores become solid. The misses are thick-walled
+    cores and short, wide ones: by shape, those are a tight loop and a disc.
+
+**Two more ways in, for the donut holes.** Most loops left after the gate above were
+inside large vessels whose wall is unlabelled between a labelled outer band and the
+labelled lumen. The two touch through many small bridges, and each bridge is a loop:
+one 64³ block held 214. The 1% of blocks with the most loops held 55% of all the
+remaining ones. Their holes fail the ring test, because the outer band is about as
+thick as the gap. Two further tests admit them:
+- **Capped:** the fraction of the region's footprint, along its main hole axis, that
+  has mask within 3 voxels beyond it on *both* sides. A hole inside one vessel's walls
+  is capped by that vessel; a loop's or a hairpin's interior is open straight
+  through. Loop and hairpin phantoms score 0.00, all 88 of them; collapsed hollow
+  vessels score 0.95–1.0. The two refused regions in the densest blocks score 0.96
+  and 0.95.
+- **Sleeve:** the area-weighted fraction of the region's 2D holes that have mask
+  inside them, i.e. a sleeve around the vessel's own core. A loop's interior holds no
+  mask. A loop threaded by a *separate* vessel does, but filling it would join two
+  separate pieces, so guard 1 refuses it; a test pins this.
+
+With both added, the end-to-end sweep still opens 0 of 126 loops at every closing
+radius.
+
+**The previous rule filled 4 of the 88 loops.** It was elongation ≤ 0.6 with alignment
+≥ 0.45, and the 4 were tight loops of thick vessels. A closing allowed Δb1 < 0
+closed 15. Both are now refused.
+
+**Fills repeat until they add nothing.** Filling a core can seal small pockets
+between the fill and the wall, so the fill runs again, for 3D-enclosed voids only.
+On the edge 9321 crop this took cavities from 5 to 0.
+
+**The raw image decides nothing.** Missing lumen should be darker than tissue
+enclosed by a loop, but on LADAF-2021-17 the two overlap: around edge 7981 the tissue
+median is 21,212 and the lumen's 20,734. `--raw` is still required: the audit
+gallery is drawn on it, and each fill region's intensity is recorded.
+
+**Whole LADAF-2021-17 lattice.** Exact Betti numbers per tree, from
+`mask_repair.betti_volume`: a tiled count that matches `skimage` on 120 random
+volumes.
+
+| | original | fill only (r0, default) | closing r1 + fill | closing r2 + fill |
+|---|---|---|---|---|
+| voxels added, left / right | — | +0.41% / +0.80% | +3.06% / +3.13% | +3.61% / +3.64% |
+| of which slice fill | — | 686k | 617k | 619k |
+| b0 (components), left / right | 1 / 1 | 1 / 1 | 1 / 1 | 1 / 1 |
+| b1 (loops), left / right | 1,949 / 806 | 1,781 / 699 | 1,782 / 693 | 1,776 / 705 |
+| b2 (cavities), left / right | 481 / 196 | 297 / 29 | 245 / 20 | 296 / 22 |
+
+The summed local Δb1 of accepted regions equals the whole-tree change (−275 at r0).
+So no loop is created or lost anywhere the local guard didn't see.
+
+**Why the closing is off by default.**
+- **Volume:** it adds about 3% volume, most of it a 0.1-voxel (3 µm) skin. On the
+  crops the mean outward surface shift is 0.09–0.12 voxel at both radii.
+- **No topological gain:** b1 and b2 barely differ from fill only.
+- **No consistent skeleton gain:** on the edge 7981 crop, `jin-mgf` gave 6 tips
+  (fill only), 11 (r1) and 4 (r2). On edge 9321 the fill alone takes it from 126 tips
+  to 10.
+
+**An earlier unguarded version must not be used.** It allowed closing patches to
+remove loops: 825 of its patches did, and its b1 fell to 240 / 155. That drop
+included the tight-loop and hairpin cases the phantoms show it could not tell from a
+defect.
+
+`tests/test_mask_repair.py` builds each failure mode and checks the whole volume's
+Betti numbers afterwards:
+- parallel arms that a plain closing welds;
+- crossing vessels with a 2-voxel gap;
+- a bowed pair whose weld would close a tunnel;
+- loops with tissue, dark or oversized interiors, and tilted loops;
+- tight loops of thick vessels;
+- hairpins, with and without the closing;
+- straight, oblique and curved hollow cores.
 
 ## 7. Seeing a result in the GUI
 

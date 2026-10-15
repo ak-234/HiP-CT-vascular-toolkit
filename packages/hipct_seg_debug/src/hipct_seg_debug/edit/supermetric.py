@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import time
 import warnings
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 
 import numpy as np
@@ -329,6 +330,43 @@ def reference_bifurcations(volume, frame, *, stride: int = 1) -> ReferenceBifurc
     return out
 
 
+_TREE_CONTEXT: dict | None = None  # None: caching off (the default)
+
+
+@contextmanager
+def reuse_tree_context():
+    """Within this block, each tree's mask, image terms and reference bifurcations
+    are computed once and reused by every :func:`super_metric_per_tree` call.
+
+    They depend only on the labelling, never on the candidate, yet were rebuilt for
+    every candidate: on the full LADAF-2021-17 lattice that is a 30 GB mask, its Euler
+    number and a Lee skeleton of it, per tree, per candidate. Off by default for the
+    same reason as :func:`~.components.reuse_splits`.
+    """
+    global _TREE_CONTEXT
+    previous, _TREE_CONTEXT = _TREE_CONTEXT, {}
+    try:
+        yield
+    finally:
+        _TREE_CONTEXT = previous
+
+
+def _tree_context(labels_zyx, label, frame, tree_chi):
+    key = (id(labels_zyx), int(label), bool(tree_chi))
+    if _TREE_CONTEXT is not None:
+        hit = _TREE_CONTEXT.get(key)
+        if hit is not None and hit[0] is labels_zyx:
+            return hit[1]
+    # The full-size mask of this component alone: `frame` describes the whole
+    # volume, so the cropped `part.volume` would index into the wrong place.
+    mask = labels_zyx == label
+    context = (mask, image_terms(mask, frame.seg_spacing, tree_chi=tree_chi),
+               reference_bifurcations(mask, frame, stride=1))
+    if _TREE_CONTEXT is not None:
+        _TREE_CONTEXT[key] = (labels_zyx, context)
+    return context
+
+
 def super_metric_per_tree(graph, frame, labels_zyx, parts, *, bb_threshold: float | None = None,
                           tree_chi: bool = True, verbose: bool = False,
                           options: SuperMetricOptions | None = None) -> dict:
@@ -354,11 +392,7 @@ def super_metric_per_tree(graph, frame, labels_zyx, parts, *, bb_threshold: floa
             if verbose:
                 print(f"    tree {part.index}: no segment carries this tree; skipped")
             continue
-        # The full-size mask of this component alone: `frame` describes the whole
-        # volume, so the cropped `part.volume` would index into the wrong place.
-        mask = labels_zyx == part.label
-        image = image_terms(mask, frame.seg_spacing, tree_chi=tree_chi)
-        refs = reference_bifurcations(mask, frame, stride=1)
+        mask, image, refs = _tree_context(labels_zyx, part.label, frame, tree_chi)
         out[part.index] = super_metric(sub, frame, mask, image, refs,
                                        bb_threshold=bb_threshold, options=options)
         del mask

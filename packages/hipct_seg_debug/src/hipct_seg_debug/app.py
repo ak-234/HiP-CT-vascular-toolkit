@@ -418,7 +418,9 @@ class ViewerApp:
 
         args = self.args
         self.paint = PaintSession(self.session.labels, self.session.frame,
-                                  size_vox=args.paint_box, edits_path=args.edits)
+                                  size_vox=args.paint_box, edits_path=args.edits,
+                                  stack=self.session.stack,
+                                  materials=self.session.materials)
         mb = args.paint_box ** 3 / 1e6
         print(f"Painting enabled: {args.paint_box}^3 voxel block ({mb:.1f} MB) "
               f"around each pick"

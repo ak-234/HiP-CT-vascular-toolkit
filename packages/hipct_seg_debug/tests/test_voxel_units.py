@@ -189,3 +189,79 @@ def test_an_unstamped_file_reports_nothing_rather_than_guessing(tmp_path):
                     '    ContentType "HxSpatialGraph"\n}\n', encoding="latin-1")
     assert amira.read_voxel_stamp(path) is None
     assert amira.read_voxel_stamp(tmp_path / "missing.am") is None
+
+
+def test_mask_containment_decodes_each_slice_once_and_matches_per_variant_counts():
+    """The flip/swap variants share their slice decodes; the percentages are unchanged."""
+    f = _frame()
+    nx, ny, nz = (int(v) for v in f.seg_dims)
+    rng = np.random.default_rng(3)
+    mask = (rng.random((nz, ny, nx)) < 0.4).astype(np.uint8)
+    mask[:, 5:25, 5:35] = 1  # a block the graph sits in, so "direct" is ~100%
+
+    class _Labels:
+        decodes = 0
+
+        def slice_z(self, z):
+            type(self).decodes += 1
+            return mask[z]
+
+    ijk = np.column_stack([rng.integers(5, 35, 400), rng.integers(5, 25, 400),
+                           rng.integers(0, nz, 400)])
+
+    class _Graph:
+        points = f.seg_to_um(ijk)
+        vertices = points
+        thickness = np.full(400, 50.0)
+
+    rows = frame_mod.validate(f, _Graph(), labels=_Labels())
+    ijk = f.um_to_seg_index(_Graph.points)
+    variants = {
+        "y-flip": np.column_stack([ijk[:, 0], ny - 1 - ijk[:, 1], ijk[:, 2]]),
+        "x-flip": np.column_stack([nx - 1 - ijk[:, 0], ijk[:, 1], ijk[:, 2]]),
+        "z-flip": np.column_stack([ijk[:, 0], ijk[:, 1], nz - 1 - ijk[:, 2]]),
+        "xy-swap": np.column_stack([ijk[:, 1], ijk[:, 0], ijk[:, 2]]),
+    }
+    expected = []
+    for name, v in variants.items():
+        v = v[np.all((v >= 0) & (v < [nx, ny, nz]), axis=1)]
+        pct = 100.0 * int((mask[v[:, 2], v[:, 1], v[:, 0]] > 0).sum()) / len(ijk)
+        expected.append(f"{name} {pct:.1f}%")
+    inside = next(r for r in rows if r.name == "centreline inside mask")
+    assert inside.passed and inside.detail.startswith("100.0% of 400")
+    flips = next(r for r in rows if r.name == "orientation unambiguous")
+    assert flips.detail == "flips: " + ", ".join(expected)
+    assert _Labels.decodes <= nz, "one decode per distinct slice, not one per variant"
+
+
+@pytest.mark.parametrize("truth, stamp", [(True, TRUE_VOXEL), (False, None)])
+def test_skeletonise_all_stamps_a_graph_extracted_under_a_corrected_voxel(monkeypatch, tmp_path,
+                                                                         truth, stamp):
+    """Unstamped, the viewer corrected an already-corrected skeleton a second time."""
+    from hipct_seg_debug.edit import __main__ as cli
+
+    f = _frame(truth=truth)
+    nx, ny, nz = (int(v) for v in f.seg_dims)
+    z, y = np.mgrid[:nz, :ny]
+    tube = ((z - nz // 2) ** 2 + (y - ny // 2) ** 2 <= 16)[:, :, None] & \
+        (np.arange(nx) >= 3)[None, None, :] & (np.arange(nx) < nx - 3)[None, None, :]
+    volume = tube.astype(np.uint8)
+    monkeypatch.setattr(cli, "_decoded", lambda _: (volume, f, None, "fake.am"))
+    monkeypatch.setattr(cli, "_seg_materials", lambda _: None)
+    args = cli.build_parser().parse_args(
+        ["skeletonise-all", "--algorithms", "geodesic-scoop", "--no-score",
+         "--out-dir", str(tmp_path), "--seg", "unused.am"])
+    assert cli.cmd_skeletonise_all(args) == 0
+    got = amira.read_voxel_stamp(tmp_path / "geodesic-scoop.am")
+    assert got == (pytest.approx(stamp) if stamp is not None else None)
+
+
+def test_a_float32_rounded_bounding_box_origin_is_still_inside_the_raw_stack():
+    """LADAF-2021-17's header puts x min at -1.9e-6 um; that is zero, not outside."""
+    class _Graph:
+        points = np.array([[100.0, 100.0, 100.0]])
+
+    rows = frame_mod.validate(_frame(lattice=_lattice(origin=-1.9e-6)), _Graph())
+    assert next(r for r in rows if r.name == "segmentation within raw stack").passed
+    rows = frame_mod.validate(_frame(lattice=_lattice(origin=-5.0)), _Graph())
+    assert not next(r for r in rows if r.name == "segmentation within raw stack").passed

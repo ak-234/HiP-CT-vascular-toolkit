@@ -72,6 +72,32 @@ first-iteration coordinates while reducing fitting attempts from 94 to 28. Obser
 iteration time changed from 196.9 to 171.2 seconds; this is not a full-tree speed
 benchmark. The updated two-iteration 3717 geometry run took 306.0 seconds.
 
+### DFS after skeleton simplification (2026-09-29)
+
+In the run above, one wrong topology caused most of the veto. 3041, 3339 and 3400
+attach to a single branch point that the skeleton split into nodes 3599, 3682, 3720 and
+3673. The links between those nodes are shorter than the parent radius: 3695 (792 um),
+3698 (1291 um) and 3395. The longest path ran through 3698/3695, stubs a third of
+the parent's calibre. `simplify-skeleton --segment 3717 3612 3655 318 4390` collapsed 6
+link clusters and refused 1 (2974, `new_segmentation_exit`). The new ids are 3711, 3610,
+3653, 318 and 4382, with roots 2129 and 6099. The run used the same options as before: two
+iterations, eight stations and eight workers, geometry only.
+
+| Region | Blocked fits, v2 → now | Primary path | Pinned vertices | Outside edges |
+|---|---|---|---|---|
+| 3717 | 22 → 0 | blocked → moving | 18 | 9 → 9 |
+| 3612/3655 | 110 → 0 | moving | 10 | 5 → 5 |
+| 318 (control) | 1 → 0 | moving | 2 | 1 → 1 |
+| 4390 (control) | 0 → 0 | moving | 0 | 7 → 7 |
+
+Collapsing the links alone, before pinning was added, made the 3717 primary path move.
+3041, 3339, 3400 and 3551 then blocked only their own fits, each at an interior edge
+with `contained_alpha: null`: their polylines lie on the boundary. Active-set pinning
+removed those blocks. No junction node was pinned. No region converged in two
+iterations: 3717 still moved up to 809 um in iteration 2, as its collapsed junctions
+settle. The next step is a longer regional run, not the full tree. The flagged
+repositioned junctions (`at_ball_edge`) also need checking in the overlays.
+
 The separate `dfs-confidence` profile experiment on the completed v5 measurements
 filled unsupported samples on 3717 and 3612. Segment 3655 remained unresolved:
 its bracketing anchors were 3600.5 um apart, exceeding the default 3157.8 um local
@@ -80,6 +106,43 @@ does not qualify the v5 geometry or replace remeasurement after DFS refinement.
 
 See [CENTRELINE_REFINEMENT.md](CENTRELINE_REFINEMENT.md) for the opt-in commands,
 saved path ordering, interpolation limits and provenance fields.
+
+### Contained leaves and through-junction ownership (2026-10-06)
+
+3655 sat about 600 um from its own section centroids after DFS fitting. It lies
+wholly inside a flattened degree-4 confluence, and three things contaminated its
+sections: the medial-sheet spur 1046, which lies inside 3655's lumen; 3641, its
+calibre-matched continuation through the junction; and 2706. Both fixes are now
+defaults: contained-leaf pruning in `simplify-skeleton`, and through-junction
+ownership in the shared section checks (see
+[CENTRELINE_REFINEMENT.md](CENTRELINE_REFINEMENT.md) and below). On the left tree
+(`--segment 1046`, roots 2124 and 6093), 3655 went from 0 to 3 accepted sections.
+
+Residuals are the median distance from each fitted curve to segmentation section
+centroids at 13 stations. *Lax* references reject only sections crossed by a
+rival vessel. *Exclusive* references also apply the shared ownership filter. Ids
+are those of the original graph.
+
+| Segment | Original | Before (lax / exclusive) | After (lax / exclusive) |
+|---|---|---|---|
+| 3717 | 539 / 386 | 235 / 101 | 117 / 95 |
+| 3700 | 307 / 401 | 47 / 36 | 44 / 41 |
+| 3692 | 190 / 196 | 63 / 63 | 63 / 63 |
+| 3655 | 987 / - | 608 / - | 89 / - |
+| 3612 | 671 / 667 | 60 / 56 | 14 / 6 |
+| 318 (control) | 19 / 22 | 15 / 15 | 13 / 13 |
+| 4390 (control) | 14 / 14 | 11 / 11 | 11 / 11 |
+
+Outside-segmentation edge counts were unchanged. 3655 has no exclusive reference
+section at all, and 3612 only two, so their exclusive figures rest on little or
+nothing; the lax figure is the only measure for 3655. No region converged in this
+run: the 3612/3655 main path jumped at iteration 6, and 2194 oscillated by about
+100 um.
+
+Rerun on main's code, `simplify-skeleton` reproduced the simplified graph byte for
+byte. The 3612/3655 region followed the same trajectory for three iterations and
+then diverged; the cause was not isolated. It ended at 66 um lax for 3655 and 11 / 7
+um for 3612, and was still unconverged after 8 iterations.
 
 ### Shared section checks
 
@@ -92,6 +155,12 @@ exclusive section. No angular rejection threshold has been enabled.
 Every candidate orientation uses three parallel sections and the same area,
 perimeter and centroid stability criteria. The fitted target normal is preferred.
 Topological degree-two continuations are treated as one vessel for ownership.
+So is a junction's through-vessel: the pair of incident branches that continue
+within 45 degrees of straight with calibres within a ratio of 0.75, read about two
+radii from the node (the straightest such pair if several qualify). Without it,
+3655's calibre-matched continuation 3641 (ratio 0.98) contaminated every 3655
+section. This is on by default; `HIPCT_THROUGH_JUNCTIONS=0` restores the
+degree-two-only rule.
 Non-adjacent touching lumens can be partitioned using one 3D ownership volume for
 the slab. Incident branches in a merged junction are rejected instead of assigning
 an invented boundary through the shared node. Ownership is an estimate and is

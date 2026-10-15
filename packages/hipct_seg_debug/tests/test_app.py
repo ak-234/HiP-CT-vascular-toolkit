@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from hipct_seg_debug.app import ViewerApp
@@ -385,7 +386,7 @@ def test_naming_nothing_is_still_fatal_for_the_modes_that_read_data(monkeypatch)
     monkeypatch.setattr(main_mod, "interactive",
                         lambda *a, **k: pytest.fail("should not reach the viewer"))
     for flag, value in (("validate_only", True), ("selftest", True),
-                        ("goto_slice", 2596), ("goto_candidate", 1)):
+                        ("goto_slice", 2596), ("goto_candidate", 1), ("goto_edge", 3)):
         monkeypatch.setattr(
             main_mod, "build_parser",
             lambda v=value, f=flag: SimpleNamespace(
@@ -503,3 +504,36 @@ def test_a_surface_that_does_not_exist_is_still_only_a_warning(monkeypatch, tmp_
     session = Session(args)
     assert session.mesh is None
     assert "not found" in capsys.readouterr().out
+
+
+def _graph_with_an_l_shaped_edge():
+    from hipct_seg_debug.amira import SpatialGraph
+
+    pts = np.array([[0, 0, 0], [10, 0, 0], [10, 10, 0], [10, 30, 0],
+                    [50, 50, 50], [60, 50, 50]], dtype=float)
+    return SpatialGraph(
+        path=None, n_vertex=4, n_edge=2, n_point=len(pts),
+        vertices=np.array([[0, 0, 0], [10, 30, 0], [50, 50, 50], [60, 50, 50]], float),
+        connectivity=np.array([[0, 1], [2, 3]]), n_edge_points=np.array([4, 2]),
+        points=pts, thickness=np.arange(len(pts), dtype=float))
+
+
+def test_edge_point_walks_by_arc_length():
+    g = _graph_with_an_l_shaped_edge()
+    xyz, i = g.edge_point(0, 0.5)  # 30 um of 40 along: (10, 10, 0) is the nearest stored
+    assert i == 2 and np.array_equal(xyz, [10, 10, 0])
+    assert g.edge_point(0, 0.0)[1] == 0
+    assert g.edge_point(0, 1.0)[1] == 3
+    assert g.edge_point(1, 0.0)[1] == 4  # a global point index, not a local one
+    with pytest.raises(IndexError, match="2 edges"):
+        g.edge_point(2)
+
+
+def test_goto_edge_resolves_to_a_point_on_that_edge():
+    from hipct_seg_debug.main import resolve_target
+
+    session = SimpleNamespace(graph=_graph_with_an_l_shaped_edge())
+    args = _bare_args(goto_edge=1, goto_edge_at=1.0)
+    assert np.array_equal(resolve_target(args, session, []), [60, 50, 50])
+    with pytest.raises(SystemExit, match="out of range"):
+        resolve_target(_bare_args(goto_edge=7), session, [])

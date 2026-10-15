@@ -2517,6 +2517,36 @@ class Picker3D:
             p.reset_camera_clipping_range()
             p.render()
 
+    def goto_edge(self, edge: int, at: float = 0.5, open_slices: bool = True) -> bool:
+        """Pick the centreline point `at` of the way along `edge` and fly there.
+
+        Edge ids are the ones the status line prints, so an id read off one pick (or
+        off a report) can be typed straight back in. A bad id is a note, not an
+        exception: this runs from a Qt slot, where an escaping exception aborts.
+        """
+        if self.graph is None:
+            self._note = "no dataset loaded"
+            self._refresh()
+            return False
+        try:
+            xyz, point_i = self.graph.edge_point(edge, at)
+        except IndexError as exc:
+            self._note = str(exc)
+            self._refresh()
+            return False
+        self._set_pick(xyz, source=f"edge {int(edge)}", point_i=point_i)
+        p = self.plotter
+        if p is not None:
+            r = float(self.graph.thickness[point_i]) if len(self.graph.thickness) else 0.0
+            span = max(4.0 * max(r, 200.0), 2000.0)
+            p.camera.focal_point = tuple(xyz)
+            p.camera.position = tuple(xyz + np.array([span * 3, span * 3, span * 2]))
+            p.reset_camera_clipping_range()
+            p.render()
+        if open_slices:
+            self._open()
+        return True
+
     def _open(self):
         if self.picked is None:
             self._note = "nothing picked yet - double-click a vessel"

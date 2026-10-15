@@ -42,6 +42,184 @@ def add_parsers(sub, common, seg_common):
     p.add_argument("--skip-clearance", action="store_true",
                    help="derive a radius profile without displacing centrelines")
     p.add_argument("--report-json", default=None)
+    p = sub.add_parser("simplify-skeleton", parents=[common, seg_common],
+                       help="remove short leaves, then collapse short inner links into "
+                            "one junction (PMC10182136, Fig. 4); a dry run unless --apply")
+    p.add_argument("--segment", dest="segments", type=int, action="append", default=None,
+                   help="limit link collapse to this segment's junction neighbourhood; "
+                        "leaf pruning is tree-wide and is skipped")
+    p.add_argument("--no-leaf-prune", action="store_true", help="skip phase one")
+    p.add_argument("--no-contained-prune", action="store_true",
+                   help="keep leaves that lie inside another vessel's lumen "
+                        "(medial-sheet spurs of flattened lumens)")
+    p.add_argument("--contained-nearest-host", action="store_true",
+                   help="a leaf point counts as contained only if inside the nearest "
+                        "vessel's section (default: any nearby vessel's)")
+    p.add_argument("--root-node", dest="root_nodes", type=int, action="append", default=[],
+                   help="never remove a leaf ending at this node; repeat for several")
+    p.add_argument("--leaf-factor", type=float, default=None,
+                   help="prune_spurs length factor (parent radii)")
+    p.add_argument("--leaf-min-um", type=float, default=None,
+                   help="prune_spurs absolute leaf tolerance, the paper's user threshold")
+    p.add_argument("--link-factor", type=float, default=1.0,
+                   help="collapse inner links shorter than this many parent radii; 0 disables")
+    p.add_argument("--min-length-um", type=float, default=None,
+                   help="also collapse inner links shorter than this (paper, manual)")
+    p.add_argument("--auto-thinnest", action="store_true",
+                   help="also collapse inner links shorter than the thinnest vessel's "
+                        "diameter (paper, automatic)")
+    p.add_argument("--apply", action="store_true", help="edit the graph and write --out")
+    p.add_argument("--report-json", default=None)
+    from .centreline_fair import (EMERGENCE_RADII, MAX_DEFLECTION_DEG, MAX_MOVE_RADII,
+                                  MIN_SMOOTH_VOXELS, SMOOTH_RADII, THROUGH_RADII)
+    p = sub.add_parser("fair-centreline", parents=[common, seg_common],
+                       help="smooth each vessel as one curve through its junctions, "
+                            "kept inside the segmentation; radii unchanged")
+    p.add_argument("--smooth-radii", type=float, default=SMOOTH_RADII,
+                   help=f"smoothing length in local radii (default {SMOOTH_RADII})")
+    p.add_argument("--min-smooth-voxels", type=float, default=MIN_SMOOTH_VOXELS,
+                   help=f"smoothing length floor in voxels (default {MIN_SMOOTH_VOXELS})")
+    p.add_argument("--emergence-radii", type=float, default=EMERGENCE_RADII,
+                   help="a branch's points within this many parent radii of its junction "
+                        f"are not fitted (default {EMERGENCE_RADII})")
+    p.add_argument("--through-radii", type=float, default=THROUGH_RADII,
+                   help="a vessel's own points within this many of its radii of a junction "
+                        f"it passes through are not fitted (default {THROUGH_RADII})")
+    p.add_argument("--max-deflection-deg", type=float, default=MAX_DEFLECTION_DEG,
+                   help="a vessel continues through a junction only into a branch "
+                        f"turning less than this (default {MAX_DEFLECTION_DEG:g})")
+    p.add_argument("--max-move-radii", type=float, default=MAX_MOVE_RADII,
+                   help=f"largest point move in local radii (default {MAX_MOVE_RADII})")
+    p.add_argument("--root-node", dest="root_nodes", type=int, action="append", default=[],
+                   help="start vessels here; repeat for several trees")
+    p.add_argument("--no-contract", action="store_true",
+                   help="keep degree-2 nodes instead of rejoining their segments")
+    p.add_argument("--report-json", default=None)
+
+
+def run_fair(args):
+    from .__main__ import _correct_units, _load, _open_lattice, _save
+    from .centreline_fair import fair, frame_inside
+
+    if not args.out:
+        raise ValueError("fair-centreline needs --out")
+    if Path(args.out).resolve() in {Path(p).resolve() for p in args.graph}:
+        raise ValueError("write a separate output; the input graph must be preserved")
+    graph = _load(args.graph)
+    labels, frame, _ = _open_lattice(args)
+    stamp = _correct_units(graph, frame, args)
+    report = fair(graph, spacing_um=float(frame.seg_spacing[0]), roots=args.root_nodes,
+                  inside=frame_inside(labels, frame), smooth_radii=args.smooth_radii,
+                  min_smooth_voxels=args.min_smooth_voxels,
+                  emergence_radii=args.emergence_radii, through_radii=args.through_radii,
+                  max_deflection_deg=args.max_deflection_deg,
+                  max_move_radii=args.max_move_radii, contract=not args.no_contract)
+    print(report.describe())
+    _save(graph, args.out, args.graph, voxel_um=stamp)
+    report_path = args.report_json or str(args.out) + '.report.json'
+    Path(report_path).write_text(json.dumps(report.to_dict(), indent=2, default=float),
+                                 encoding='utf-8')
+    return 0
+
+
+def run_simplify(args):
+    from .__main__ import _correct_units, _load, _open_lattice, _save
+    from .junction_links import simplify_links
+    from .junction_qualification import neighbourhood
+    from .skeleton_optimise import PRUNE_LENGTH_FACTOR, prune_spurs
+
+    if args.apply and not args.out:
+        raise ValueError("--apply needs --out")
+    if args.out and Path(args.out).resolve() in {Path(p).resolve() for p in args.graph}:
+        raise ValueError("write a separate output; the input graph must be preserved")
+    graph = _load(args.graph)
+    labels, frame, _ = _open_lattice(args)
+    stamp = _correct_units(graph, frame, args)
+    report = dict(method="PMC10182136 Fig. 4 phases 1-2", applied=bool(args.apply))
+    region = None
+    if args.segments:
+        region = sorted({s for sid in args.segments for s in neighbourhood(graph, sid)})
+        report["region_segments"] = region
+    if args.no_leaf_prune or region is not None:
+        report["leaves"] = dict(skipped="region" if region is not None else "requested")
+    else:
+        # prune_spurs edits in place; a dry run measures it on a copy.
+        target = graph if args.apply else _load(args.graph)
+        if not args.apply:
+            _correct_units(target, frame, args)
+        leaves = prune_spurs(target, length_factor=args.leaf_factor or PRUNE_LENGTH_FACTOR,
+                             min_length_um=args.leaf_min_um, bbox_um=frame.seg_bbox_um)
+        print(leaves.describe())
+        report["leaves"] = dict(vars(leaves), describe=leaves.describe())
+    if not args.no_contained_prune:
+        from .contained_leaves import find_contained_leaves, prune_contained_leaves
+        rows = find_contained_leaves(graph, labels, frame, sids=region,
+                                     protected_nodes=args.root_nodes,
+                                     any_host=not args.contained_nearest_host)
+        flagged = [r for r in rows if r["contained"]]
+        print(f"{len(flagged)} of {len(rows)} leaves lie inside another vessel's lumen"
+              f"{'' if args.apply else ' (would be removed)'}: {[r['segment'] for r in flagged]}")
+        report["contained_leaves"] = dict(rows=rows)
+        if args.apply and flagged:
+            report["contained_leaves"].update(prune_contained_leaves(graph, rows))
+            if region is not None:
+                region = [s for s in region if graph.has_segment(s)]
+    links = simplify_links(graph, labels, frame, factor=args.link_factor or None,
+                           min_length_um=args.min_length_um, auto_thinnest=args.auto_thinnest,
+                           sids=region, apply=args.apply)
+    print(links.describe())
+    for row in links.clusters:
+        print(f"  links {row['links']} nodes {row['nodes']}: {row['status']}"
+              + (f" ({row['reason']})" if row.get('reason') else "")
+              + (f", moved {row['move_from_p_ca_um']:.0f} of {row['ball_um']:.0f} um from p_CA"
+                 + (" [at search edge: review]" if row['at_ball_edge'] else "")
+                 if 'p_new' in row else ""))
+    report["links"] = links.to_dict()
+    if args.apply:
+        from .junction_links import saved_ids
+        report["renumbered"] = renumbered = saved_ids(graph)
+        for sid in args.segments or ():
+            if not graph.has_segment(sid):
+                print(f"segment {sid} was removed")
+                continue
+            new = renumbered["segments"].get(sid, sid)
+            if new != sid:
+                print(f"segment {sid} is saved as {new}; node and segment ids shift after "
+                      "each removed link (map in the report's 'renumbered')")
+        _save(graph, args.out, args.graph, voxel_um=stamp)
+    report_path = args.report_json or (str(args.out)+'.report.json' if args.out else None)
+    if report_path:
+        Path(report_path).write_text(json.dumps(report, indent=2, default=float), encoding='utf-8')
+    return 0
+
+
+def _section_heartbeat(total: int, every: int = 25):
+    """A `section_progress` callback printing one line per `every` segments measured.
+
+    Each iteration starts by remeasuring every segment's sections, and on a whole tree
+    that phase runs for tens of minutes. Without this it printed nothing at all, which
+    reads as a hang; one line per segment would be 725 lines an iteration.
+    """
+    import time
+
+    state = {"iteration": None, "done": 0, "cached": 0, "start": time.monotonic()}
+
+    def report(row):
+        if "stage" in row:  # e.g. the centring audit: pass it through as is
+            print(json.dumps(row), flush=True)
+            return
+        if row.get("iteration") != state["iteration"]:
+            state.update(iteration=row.get("iteration"), done=0, cached=0,
+                         start=time.monotonic())
+        state["done"] += 1
+        state["cached"] += bool(row.get("cached"))
+        if state["done"] % every == 0 or state["done"] == total:
+            print(json.dumps(dict(stage="sections", iteration=state["iteration"],
+                                  measured=state["done"], of=total, cached=state["cached"],
+                                  elapsed_s=round(time.monotonic() - state["start"], 1))),
+                  flush=True)
+
+    return report
 
 
 def run(args):
@@ -58,6 +236,7 @@ def run(args):
     before = {sid: graph.coords(sid).copy() for sid in graph.segment_ids()}
     if args.command == "refine-centreline":
         from .centreline_refine import refine
+        total = len(args.segments) if args.segments else len(graph.segment_ids())
         report = refine(
             graph, frame, labels, method=args.method, sids=args.segments,
             fixed_nodes=set(args.fixed_nodes) | roots, root_nodes=roots,
@@ -67,6 +246,7 @@ def run(args):
             reuse_sections=not getattr(args, 'no_section_cache', False),
             progress=lambda row: print(json.dumps(row), flush=True),
             path_progress=lambda row: print(json.dumps(dict(stage='path_fit', **row)), flush=True),
+            section_progress=_section_heartbeat(total),
         ).to_dict()
         if not args.geometry_only:
             result = rp.measure_radii(graph, frame, labels, workers=args.workers,

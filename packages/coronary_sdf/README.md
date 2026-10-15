@@ -1,5 +1,9 @@
 # `coronary_sdf`
 
+For corrected HiP-CT coronary resistance calibration and explicit Windkessel CFX
+export, see the [LADAF RCR protocol](docs/hipct_rcr_protocol.md) and
+[runnable synthetic case](examples/rcr/synthetic_case.json).
+
 The production defaults remain the compatibility path:
 `CENTERLINE_SMOOTHER="savgol"`, `SDF_FIELD_METHOD="legacy"`, and
 `SDF_MESH_METHOD="meshlib"`. The constrained multiscale smoother, graph

@@ -7,6 +7,10 @@ Pattern Recognition Letters 76, 32–40 (2016),
 It is a separate skeletonisation candidate. It does not replace `dfs-centroid`
 or refine an existing graph while retaining its segment IDs.
 
+> **To run it end to end** (mask correction, skeletonisation, pruning, simplification
+> and smoothing, from the command line or the GUI), follow
+> [JIN_MGF_WORKFLOW.md](JIN_MGF_WORKFLOW.md). This page describes the method.
+
 ## Implemented method
 
 The core accepts fuzzy membership in [0,1] on a cubic grid. The label-lattice
@@ -85,6 +89,115 @@ the complete junction neighbourhoods and branch correspondence against the
 segmentation before choosing geometry, then remeasure with the shared section
 filter. Neither the three clinical target regions nor a full tree have been
 qualified with this backend. Do not use its output directly as a final surface.
+
+## Collapse-aware variant: `jin-mgf`
+
+`jin-mgf` (`edit/jin_mgf.py`) keeps the published control loop above unchanged and
+adds two switchable modifications through hooks on `jin_mcp.extract`. With both
+off (`medialness=lsf;marking=dilate`) the output is identical to `jin-mcp`, which
+a test pins.
+
+- **`medialness=mgf`.** Strong-quench voxels are labelled curve or sheet by the
+  ridge dimension of the smoothed EDT Hessian (`classifier=hessian`, the default),
+  or by PCA of the strong set (`classifier=pca`, the methodology note's form). On
+  sheet voxels a voxelised *medial geodesic function* (Dey & Sun, SGP 2006) is
+  computed. `mgf_mode=exact`, the default, takes the boundary geodesic between
+  antipodal contacts; `rim` is the cheap in-sheet distance-from-rim proxy.
+  Medialness is then `LSF x w`, where `w` is near 1 on the MGF ridge (negative
+  divergence of its unit gradient) and `w_min` elsewhere on the sheet. Curves
+  keep LSF.
+- **`marking=section`.** After the paper's 2 x FDT dilation, the lumen in a
+  one-voxel slab normal to each accepted path is also marked. A slab still open
+  at its window edge is refused.
+
+The Hessian classifier is the default because PCA labelled most of a voxelised
+round tube as sheet: LSF has digital "spokes" there. Sheet rims are given the MGF
+too (`sheet_support`). The Hessian calls them "curve", and with full LSF the path
+rode along the slit's edge.
+
+On the flattened tube that `test_flattened_tube_exposes_medial_sheet_limitation`
+keeps for `jin-mcp`, each modification alone gives exactly two terminals. The
+phantom results are in [SKELETON_BENCHMARK.md](SKELETON_BENCHMARK.md). The same
+limits as `jin-mcp` apply: an isotropic grid, one component, a tree, and FDT
+placeholder radii.
+
+```powershell
+python -m hipct_seg_debug.edit skeletonise-all --seg $env:HIPCT_SEG --roi-zyx Z0 Z1 Y0 Y1 X0 X1 `
+  --algorithms "jin-mcp,jin-mgf,jin-mgf[mgf_mode=rim],jin-mgf[medialness=lsf;marking=section]" `
+  --out-dir runs/jin-mgf --summary-json runs/jin-mgf/summary.json
+```
+
+### Smoothing the output
+
+A Jin path runs through voxel centres, so consecutive steps turn a median 45°.
+`fair-centreline` (`edit/centreline_fair.py`) smooths it inside the mask. It fits each
+vessel as one curve through its junctions, and it ignores a branch's first stretch
+inside its parent, so the branch leaves the junction without a kink. Run it on a
+written graph (see [CLI.md](CLI.md#fair-centreline--smooth-each-vessel-through-its-junctions)),
+or ask for it in the skeletoniser as `jin-mgf[fair=true]`.
+
+A branch at right angles to a vessel and shorter than about `fill_max_radii` (12) of
+the vessel's radii is not extracted at all. `marking=section` fills the parent's
+normal slab, and that slab holds the whole branch. Branches at 45° are extracted.
+
+## Whole trees: the sparse engine
+
+`edit/jin_sparse.py` runs the same method on lumen voxels only. The dense
+implementation keeps about six float64 fields over the bounding box, which is why it
+has a 2 M-voxel guard; a LADAF-2021-17 tree box is 24 G voxels.
+
+- **Memory.** The only box-sized arrays are a 4-byte lookup and the mask.
+  Everything else is per lumen voxel, and every per-voxel loop is numba.
+- **Identical to dense.** With `incremental=False` the output matches the dense
+  engine's exactly: the same vertices, edges and FDT on every test shape and
+  phantom. Raster order is preserved, so heap and component ties break as they do
+  in the dense code.
+- **`incremental=True`, the default.** Each round continues from the last round's
+  shortest-path maps instead of starting again; this is the differential IFT the
+  methodology note proposes. Both seed sets only grow, so the distances are exact.
+  Only tied predecessors can differ.
+- **`allow_loops`.** This lets a mask with loops through the tree-only Euler guard.
+  The output is still a tree, with the loops cut. The 2021-17 mask has
+  χ = −1467, so it needs this.
+- **`jin-mgf` on the sparse engine.**
+  - The Hessian classifier uses a float32 `edt` plus a Gaussian over the box, and
+    the same `np.gradient` stencils, evaluated at strong-quench voxels only. It
+    labels exactly the same sheet voxels as dense.
+  - `rim` mode is identical to dense.
+  - `exact` mode finds contacts by local search rather than a box-sized feature
+    transform, and runs its per-voxel boundary geodesics across all cores.
+    Equidistant contacts tie-break by scan order, so its output can differ from
+    dense by sub-voxel amounts; the leaf and sheet counts are unchanged on the
+    phantoms.
+  - The PCA classifier is dense-only.
+- **Choosing the engine.** `--jin-engine auto` (the default) uses dense up to
+  `--jin-max-voxels` and sparse beyond. `--jin-engine dense` keeps the old
+  decode-time refusal.
+- **Measured.** On a whole LADAF-2024-28 tree (2.6 M lumen voxels), `jin-mcp`
+  takes 36 s over 14 rounds and `jin-mgf` 146 s.
+
+```powershell
+python -m hipct_seg_debug.edit skeletonise-all --seg $env:HIPCT_SEG --voxel-um 32.04 `
+  --per-tree --workers 3 --jin-engine sparse --jin-allow-loops `
+  --algorithms "jin-mcp,jin-mgf" --no-score --out-dir $env:HIPCT_OUT\jin-full
+```
+
+## Rooting at the inlet
+
+By default Jin roots each tree at its maximum-FDT voxel. On a coronary tree that is
+inside the widest vessel, near the inlet but short of it. Jin then traces back out to
+the inlet's cut face, and on a flared inlet it reaches the face's rim twice.
+- **On LADAF-2021-17:** the left tree's inlet came out as a Y, a junction 2.0 mm from
+  the inlet with tips 1.8 and 2.2 mm away.
+- **The fix:** give the inlet. `--root-graph` takes each tree's widest free end from
+  a graph you trust, and `--root-xyz` takes a world position, e.g. from the viewer's
+  pick readout. Roots are snapped onto each tree's lumen within 12 voxels.
+
+```powershell
+python -m hipct_seg_debug.edit skeletonise-all --seg $env:HIPCT_SEG --voxel-um 32.04 `
+  --per-tree --jin-engine sparse --jin-allow-loops --algorithms jin-mgf `
+  --root-graph refined_dfs.am --out-dir $env:HIPCT_OUT\jin-rooted
+```
 
 ## Centroid/curvature hybrid and VMTK comparison
 

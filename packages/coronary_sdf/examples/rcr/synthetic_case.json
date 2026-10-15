@@ -1,0 +1,57 @@
+{
+  "schema": "coronary-rcr/1",
+  "network": "synthetic_network.json",
+  "physiology": {
+    "myocardial_mass_g": 91.62400695,
+    "perfusion_ml_min_g": 0.8,
+    "density_kg_m3": 1050,
+    "viscosity_pa_s": 0.0035,
+    "arterial_mmhg": 93,
+    "distal_mmhg": 5
+  },
+  "tree_fractions": {
+    "left": 0.7,
+    "right": 0.3
+  },
+  "diameter_exponent": 2.27,
+  "terminal_reference_radius_m": 0.0001,
+  "terminal_reference_resistance": 1000000000000,
+  "rcr": {
+    "mode": "fixed",
+    "alpha": 0.1,
+    "tau_distal_s": 1
+  },
+  "structured_tree": {
+    "daughter_radius_ratios": [
+      0.7,
+      0.65
+    ],
+    "length_radius_ratio": 5,
+    "terminal_radius_m": 0.0002,
+    "max_generations": 12,
+    "max_segments": 10000
+  },
+  "cfx": {
+    "mesh_units": "mm",
+    "time_step_s": 0.001,
+    "period_s": 1,
+    "cycles": 5,
+    "inlet_regions": {
+      "left": "inlet",
+      "right": "inlet"
+    },
+    "outlet_regions": {
+      "left": {
+        "A": "a",
+        "B": "b"
+      },
+      "right": {
+        "A": "a",
+        "B": "b"
+      }
+    }
+  },
+  "comparison": {
+    "reference_method": "hipct"
+  }
+}

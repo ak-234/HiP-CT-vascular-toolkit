@@ -153,7 +153,11 @@ def preprocess_graph(triple: Triple) -> Triple:
     working = triple.copy()
     nodes, points, segments = working.as_args()
 
-    if config.MIN_STRAHLER_ORDER > 0:
+    # Only a graph that records Strahler orders can be filtered by them. A missing
+    # order reads as 0, so on a graph without the field -- every skeleton this
+    # package derives itself (jin-mgf, TEASAR, ...) -- the filter would discard every
+    # segment and the session would fail with "no segment produced a usable spline".
+    if config.MIN_STRAHLER_ORDER > 0 and any("strahler" in s for s in segments):
         segments = [s for s in segments if s.get("strahler", 0) >= config.MIN_STRAHLER_ORDER]
     if config.MERGE_DEGREE2_SEGMENTS:
         nodes, segments, _ = merge_degree2_segments(nodes, points, segments)

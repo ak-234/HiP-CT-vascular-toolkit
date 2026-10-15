@@ -37,6 +37,7 @@ origin route for the same reason.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -168,8 +169,20 @@ def _grouped_labels(volume, regions, connectivity: int):
         return stats, [(None, [(lab, int(stats.sizes[lab])) for lab in order])]
 
     index = np.arange(1, stats.n + 1)
-    lo = np.asarray(ndimage.minimum(volume, stats.labels, index=index))
-    hi = np.asarray(ndimage.maximum(volume, stats.labels, index=index))
+    # Each component's lowest and highest material value, over its own voxels only.
+    # `ndimage.minimum/maximum(volume, labels, index)` walk every voxel of the volume
+    # -- 30 G on the full LADAF-2021-17 lattice, most of a 42-minute split -- for an
+    # answer about the 120 M that are foreground.
+    flat = stats.labels.ravel()
+    where = np.flatnonzero(flat)
+    labs = flat[where].astype(np.int64)
+    vals = volume.ravel()[where]
+    lo_all = np.full(stats.n + 1, np.iinfo(np.int64).max, dtype=np.int64)
+    hi_all = np.full(stats.n + 1, np.iinfo(np.int64).min, dtype=np.int64)
+    np.minimum.at(lo_all, labs, vals)
+    np.maximum.at(hi_all, labs, vals)
+    lo, hi = lo_all[index], hi_all[index]
+    del flat, where, labs, vals
     material_of = {int(lab): int(v) for lab, v in zip(index, lo)}
     sizes = {int(lab): int(stats.sizes[lab]) for lab in index}
 
@@ -194,9 +207,53 @@ def _grouped_labels(volume, regions, connectivity: int):
     return stats, groups
 
 
+_SPLITS: dict | None = None  # None: caching off (the default)
+
+
+@contextmanager
+def reuse_splits():
+    """Within this block, a repeated :func:`split_components` call returns the first.
+
+    For commands that decode a mask once and never edit it. ``skeletonise-all
+    --per-tree`` splits the same volume twice per candidate -- once to skeletonise,
+    once to score -- and on the full LADAF-2021-17 lattice each split is a 26-connected
+    labelling of a 30 GB volume. Off by default, because a caller that edits the mask
+    in place between calls would otherwise be handed a stale labelling.
+    """
+    global _SPLITS
+    previous, _SPLITS = _SPLITS, {}
+    try:
+        yield
+    finally:
+        _SPLITS = previous
+
+
 def split_components(volume, frame, *, min_voxels: int = 0, max_trees: int | None = None,
                      connectivity: int = 3, pad: int = 1, verbose: bool = False,
                      materials=None):
+    """``(parts, stats)`` -- see :func:`_split_components`; cached inside
+    :func:`reuse_splits`."""
+    if _SPLITS is None:
+        return _split_components(volume, frame, min_voxels=min_voxels, max_trees=max_trees,
+                                 connectivity=connectivity, pad=pad, verbose=verbose,
+                                 materials=materials)
+    regions = tuple((m.name, int(m.value)) for m in regions_of(materials))
+    key = (id(volume), int(min_voxels), max_trees, int(connectivity), int(pad), regions)
+    hit = _SPLITS.get(key)
+    if hit is not None and hit[0] is volume:
+        if verbose:
+            print(f"  reusing this volume's split: {len(hit[1][0])} component(s)")
+        return hit[1]
+    result = _split_components(volume, frame, min_voxels=min_voxels, max_trees=max_trees,
+                               connectivity=connectivity, pad=pad, verbose=verbose,
+                               materials=materials)
+    _SPLITS[key] = (volume, result)  # the volume is held so its id cannot be reused
+    return result
+
+
+def _split_components(volume, frame, *, min_voxels: int = 0, max_trees: int | None = None,
+                      connectivity: int = 3, pad: int = 1, verbose: bool = False,
+                      materials=None):
     """``(parts, stats)`` -- one :class:`TreePart` per component worth skeletonising.
 
     `min_voxels` drops debris; `max_trees` keeps only the N largest. What is dropped is

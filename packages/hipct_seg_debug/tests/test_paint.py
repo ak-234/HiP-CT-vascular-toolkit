@@ -36,6 +36,13 @@ class FakeViewer:
         self.layers.append(layer)
         return layer
 
+    def add_points(self, data, **kwargs):
+        from napari.layers import Points
+
+        layer = Points(data, **kwargs)
+        self.layers.append(layer)
+        return layer
+
 
 @pytest.fixture
 def viewer():
@@ -270,3 +277,131 @@ def test_whole_slices_tolerates_an_empty_viewer():
 def test_paint_session_refuses_a_bare_lattice(frame):
     with pytest.raises(TypeError, match="MaskSource"):
         PaintSession(FakeLattice(np.zeros((2, 2, 2), np.uint8)), frame)
+
+
+# ------------------------------------------------------------- labels and tools
+
+
+def _two_tree_source():
+    """Left_Tree (1) in the low rows, Right_Tree (2) -- the majority -- in the high."""
+    nx, ny, nz = SEG_DIMS
+    vol = np.zeros((nz, ny, nx), dtype=np.uint8)
+    vol[:, :3, :] = 1
+    vol[:, 6:, :] = 2
+    return MaskSource(FakeLattice(vol))
+
+
+def _materials():
+    from hipct_seg_debug.amira import Material
+
+    return (Material("Exterior", 0), Material("Left_Tree", 1), Material("Right_Tree", 2))
+
+
+def test_every_label_is_coloured_and_the_brush_takes_the_box_majority(viewer, frame):
+    session = PaintSession(_two_tree_source(), frame, size_vox=999, materials=_materials())
+    session.attach(viewer, frame.seg_to_um([[5, 6, 4]])[0])
+    colours = session.layer.colormap.color_dict
+    assert 1 in colours and 2 in colours
+    assert session.layer.selected_label == 2
+    assert session.label_choices() == [("Left_Tree", 1), ("Right_Tree", 2)]
+    assert "Right_Tree" in session.describe()
+    assert session.layer.preserve_labels
+
+
+def test_a_pinned_label_survives_a_new_box_and_napari_s_picker_pins(viewer, frame):
+    session = PaintSession(_two_tree_source(), frame, size_vox=999, materials=_materials())
+    session.attach(viewer, frame.seg_to_um([[5, 6, 4]])[0])
+    session.set_label(1)
+    session.attach(viewer, frame.seg_to_um([[2, 2, 2]])[0])
+    assert session.layer.selected_label == 1
+    session.set_label("auto")
+    assert session.layer.selected_label == 2
+    session.layer.selected_label = 1  # what napari's own label picker does
+    assert session.label_mode == 1
+
+
+def test_attach_adds_each_helper_layer_once(viewer, frame, source):
+    from hipct_seg_debug.edit.paint import layer_names
+
+    session = _session_with_layer(source, frame, viewer)
+    session.attach(viewer, frame.seg_to_um([[2, 2, 2]])[0])
+    names = [lay.name for lay in viewer.layers]
+    assert sorted(names) == sorted(layer_names())
+
+
+def _tool_session(viewer, mask, raw, *, size=999):
+    from hipct_seg_debug.edit.mask_repair import ArraySampler
+
+    from .conftest_geometry import make_frame
+
+    frame = make_frame(mask.shape)
+    source = MaskSource(FakeLattice(mask))
+    session = PaintSession(source, frame, size_vox=size, materials=_materials(),
+                           sampler=ArraySampler(raw))
+    centre = np.asarray(mask.shape)[::-1] // 2
+    session.attach(viewer, frame.seg_to_um([centre])[0])
+    assert session.box.origin_kji == (0, 0, 0)
+    return session, source
+
+
+def _seed(session, group, kji_points):
+    session.set_seed_group(group)
+    for kji in kji_points:
+        session.seeds_layer.add(session.layer.data_to_world(np.asarray(kji, float)))
+
+
+def test_fill_writes_the_tree_s_label_as_one_undo_step(viewer):
+    from .test_mask_tools import NOTCH_SEEDS, notched_tube, render
+
+    mask, lumen, missing = notched_tube(value=2)
+    session, source = _tool_session(viewer, mask, render(lumen))
+    _seed(session, 1, NOTCH_SEEDS)
+    result = session.run_fill()
+    assert result is not None and result.ok, session.status
+    assert result.value == 2
+    k, row, col, val = source.edits.entries()
+    assert len(val) == int(result.write.sum()) and set(val.tolist()) == {2}
+    assert (np.asarray(session.result_layer.data) == 1).sum() == len(val)
+
+    session.layer.undo()  # one Ctrl+Z takes the whole fill back
+    assert session.commit() == 0
+    assert source.edits.is_empty
+
+
+def test_split_stores_only_erasures_and_switches_to_replace(viewer):
+    from .test_mask_tools import GROUPS, fused_pair
+
+    mask, raw, *_ = fused_pair()
+    session, source = _tool_session(viewer, mask, raw)
+    _seed(session, 1, GROUPS[0])
+    _seed(session, 2, GROUPS[1])
+    result = session.run_split()
+    assert result is not None and result.ok, session.status
+    assert source.edits.stats()["added"] == 0
+    assert source.edits.stats()["removed"] == int(result.write.sum())
+    assert session.splice_mode == "replace"
+
+
+def test_tools_explain_missing_seeds(viewer):
+    from .test_mask_tools import notched_tube, render
+
+    mask, lumen, _ = notched_tube()
+    session, source = _tool_session(viewer, mask, render(lumen))
+    assert session.run_fill() is None
+    assert "seeds" in session.status
+    assert session.run_split() is None
+    assert source.edits.is_empty
+
+
+def test_relabel_strokes_reloads_the_layer(viewer, frame):
+    source = _two_tree_source()
+    session = PaintSession(source, frame, size_vox=999, materials=_materials())
+    session.attach(viewer, frame.seg_to_um([[5, 6, 4]])[0])
+    # A stroke with the old fixed label, right beside Right_Tree.
+    session.layer.data_setitem((np.array([2]), np.array([5]), np.array([4])), 1)
+    session.commit()
+    counts = session.relabel_strokes()
+    assert counts["relabelled"] == 1
+    assert np.asarray(session.layer.data)[2, 5, 4] == 2
+    assert session.commit() == 1  # and the reload is what the next diff sees
+    assert source.slice_z(2)[5, 4] == 2

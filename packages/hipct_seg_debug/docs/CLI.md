@@ -124,12 +124,21 @@ python -m hipct_seg_debug [flags]
 Modes 3 and 4 both run validation and candidate detection first, so a default run
 costs ~18 s before a window appears (3 s loading, 15 s detecting).
 
-`--goto-*` precedence, when more than one is given: **`--goto-um` › `--goto-candidate`
-› `--goto-slice`**. `--goto-row` / `--goto-col` only qualify `--goto-slice`, and
-default to the middle of the stack.
+`--goto-*` precedence, when more than one is given: **`--goto-um` › `--goto-edge`
+› `--goto-candidate` › `--goto-slice`**. `--goto-row` / `--goto-col` only qualify
+`--goto-slice`, and default to the middle of the stack.
+
+`--goto-edge ID` takes the edge id the 3D status line prints for a pick, and the ids
+every command-line report uses; with several `--graph` files it is the merged
+numbering, which is also what the status line shows. `--goto-edge-at F` picks how far
+along it, by arc length (default `0.5`, the middle). The 3D window's **layers** panel
+has the same thing as a *go to edge* box, which also flies the camera there and opens
+the slice browser.
 
 ```
 python -m hipct_seg_debug --goto-um 68000 55000 96000
+python -m hipct_seg_debug --goto-edge 2398
+python -m hipct_seg_debug --goto-edge 2398 --goto-edge-at 0.2
 python -m hipct_seg_debug --goto-candidate 1
 python -m hipct_seg_debug --goto-slice 3361 --goto-row 2638 --goto-col 969
 python -m hipct_seg_debug --goto-slice 2727                 # centre of that slice
@@ -252,6 +261,13 @@ Needs `coronary_sdf`; see [edit/README.md](EDITOR.md) for how it is located.
 
 **Give `--edits` a path.** Without one, corrections live only in memory and the
 session warns on exit that they were never saved.
+
+The brush writes the label shown in the paint panel: the commonest label in each box,
+or one pinned there (or with napari's own picker, `5`). On a mask with a `Materials`
+block that is `Left_Tree` (1) or `Right_Tree` (2); every label has its own colour, and
+*protect other labels* (on by default) keeps one tree's brush and eraser off the
+other's voxels. The panel's **repair tools** fill a collapsed lumen and split fused
+vessels from seeds; see [EDITOR.md](EDITOR.md#repair-tools-collapsed-lumen-and-fused-vessels).
 
 ## Other
 
@@ -937,14 +953,26 @@ commands below score a skeleton properly instead — see
 python -m hipct_seg_debug.edit skeletonise-all --stride 4 --out-dir cand/
 python -m hipct_seg_debug.edit skeletonise-all --algorithms lee,teasar,amira \
     --amira-graph avizo.am --out-dir cand/
+python -m hipct_seg_debug.edit skeletonise-all --roi-zyx Z0 Z1 Y0 Y1 X0 X1 \
+    --algorithms "teasar-readme[scale=4;const_um=330],jin-mgf,geodesic-scoop" \
+    --out-dir cand/ --summary-json cand/summary.json
 ```
 
 | flag | default | meaning |
 |---|---|---|
-| `--algorithms LIST` | `lee` | comma-separated: `lee`, `teasar`, `amira` |
+| `--algorithms LIST` | `lee` | comma-separated: `lee`, `teasar`, `teasar-readme`, `amira`, `jin-mcp`, `jin-mcp-centroid`, `jin-mgf`, `geodesic-scoop`, `vmtk`. Each may carry parameters in brackets, `name[key=value;...]`, so one run holds a grid; a grid point is written as `name_key-value….am` |
+| `--summary-json PATH` | — | per-candidate counts, terminal fraction, roughness, timing and super-metric terms |
 | `--amira-graph PATH` | the Avizo graph | existing `.am` to score as the `amira` candidate |
-| `--teasar-scale N` | 2.5 | TEASAR penalty scale — Centerline Tree's `slope` |
+| `--teasar-scale N` | 2.5 | TEASAR penalty scale — Centerline Tree's `slope` (`teasar` and `teasar-readme`) |
 | `--teasar-const-um N` | 300.0 | TEASAR fixed penalty, µm — its `zeroVal` |
+| `--jin-root-zyx Z Y X` | max FDT/EDT | extraction root for `jin-mcp`, `jin-mgf`, `geodesic-scoop`, in ROI voxels |
+| `--root-xyz X Y Z` | — | extraction root in world um, repeatable, one per tree (e.g. the viewer's pick readout); used by Jin and `geodesic-scoop` with `--per-tree` |
+| `--root-graph PATH` | — | each tree's extraction root from a reference graph: its widest free end, i.e. the inlet of a refined DFS centreline |
+| `--mgf-mode` | `exact` | `jin-mgf` medial geodesic function: `exact` boundary geodesic or the `rim` proxy |
+| `--mgf-theta N` | 0.3 | `jin-mgf` ridge-weight divergence scale |
+| `jin-mgf[fair=true]` | off | smooth the result with [`fair-centreline`](#fair-centreline--smooth-each-vessel-through-its-junctions), kept inside the tree's mask; `fair_smooth_radii` and `fair_emergence_radii` set its two lengths |
+| `--scoop-shell-um N` | largest voxel side | `geodesic-scoop` shell width (may not be smaller) |
+| `--scoop-min-branch-radii N` | 2.0 | `geodesic-scoop` spur pruning, in vessel radii |
 | `--bb-threshold N` | 900.0 | bifurcation match distance, µm |
 | `--no-tree-chi` | off | score χ against the mask's loops, not the tree ideal |
 | `--no-score` | off | write candidates without the dense image topology/super-metric pass |
@@ -1016,6 +1044,11 @@ For segmentation-constrained geometry fitting without pruning or de-looping, use
 circular-vessel collisions using smooth displacement fields and fixed measured
 radii. Both commands write diagnostic reports and remain opt-in; see
 [CENTRELINE_REFINEMENT.md](CENTRELINE_REFINEMENT.md) for the workflow and limits.
+`simplify-skeleton` removes short leaves and leaves lying inside another vessel's
+lumen, and collapses short inner links that split one junction into several, before
+`dfs-centroid` fitting. It is a dry run unless `--apply` is given, and it renumbers
+ids on save. `--no-contained-prune` and `--contained-nearest-host` adjust the
+contained-leaf phase; `--root-node` protects a root's leaf from it.
 
 Runs **de-loop → prune → re-centre × N → smooth**. Topology before geometry, so the
 smoother is never asked to smooth a segment about to be deleted — and smoothing goes
@@ -1061,6 +1094,60 @@ with `--out`. Both tables matter: the super metric barely moves on this defect �
 points doubling back costs about 0.005 of cl-sensitivity — so `M_S` alone would call the
 broken result a tie. Sweep terms are named after the flags, minus the leading dashes, and
 a term nothing reads is refused before the volume is decoded rather than minutes later.
+
+---
+
+### `fair-centreline` — smooth each vessel through its junctions
+
+```
+python -m hipct_seg_debug.edit fair-centreline jin-mgf.am --seg seg.am --voxel-um 32.04     --out jin-mgf_fair.am
+```
+
+Removes the voxel staircase from a path-search skeleton (`jin-mgf`, `jin-mcp`) without
+the kinks at bifurcations that segment-by-segment smoothing leaves. Radii are not
+changed, and nothing moves out of the segmentation.
+
+- **Degree-2 nodes are rejoined**, so a segment ends only at a real branch or a
+  terminal.
+- **Segments are chained into vessels.** At each junction a vessel continues into the
+  branch that turns least from its course, provided it turns less than
+  `--max-deflection-deg`. Each segment gets a `vessel_id` edge attribute naming its
+  vessel, so one long vessel can be selected or coloured as a whole.
+- **Each vessel is fitted as one curve, parents first.** A junction the vessel passes
+  through is just a point on its curve. A branch then starts wherever its parent's fit
+  put the node. Two windows carry no data weight: a branch's points within
+  `--emergence-radii` parent radii of the junction, and the parent's own points within
+  `--through-radii` of it. Those points lie inside the junction's confluence, where
+  there is no centre to fit.
+- **Containment.** An edge the fit would take outside the segmentation pins its two
+  points where they were, and the vessel is refitted. Edges already outside before
+  fairing are pinned and are not counted against it. The report lists any vessel left
+  unchanged.
+
+| flag | default | meaning |
+|---|---|---|
+| `--smooth-radii N` | 2.0 | smoothing length, in local radii |
+| `--min-smooth-voxels N` | 2.0 | smoothing length floor, in voxels; Jin radii are FDT thicknesses |
+| `--emergence-radii N` | 1.5 | a branch's unfitted stretch next to its junction, in parent radii |
+| `--through-radii N` | 1.5 | a vessel's unfitted stretch either side of a junction it passes through |
+| `--max-deflection-deg N` | 60 | a vessel continues only into a branch turning less than this |
+| `--max-move-radii N` | 1.0 | largest move outside those stretches, in local radii (at least 2 voxels) |
+| `--root-node ID` | auto | where vessels start; repeat for several trees |
+| `--no-contract` | off | keep degree-2 nodes |
+| `--report-json PATH` | `OUT.report.json` | counts, moves, and before/after measures |
+| `--out PATH` | required | must differ from the input |
+| *plus the shared segmentation flags* | | `--seg` is required |
+
+Measured on both LADAF-2021-17 trees (`jin-mgf`, 7763 segments; the pass itself takes under 2 minutes):
+
+| | step-to-step turn, median / p95 | junction kink, median / p95 |
+|---|---|---|
+| `jin-mgf` | 45.0° / 60.0° | 20.1° / 51.4° |
+| `fair-centreline` | 1.0° / 6.1° | 5.1° / 24.1° |
+| `refine-centreline --method dfs-centroid` (left tree) | 1.3° / 6.2° | 21.7° / 50.1° |
+
+The junction kink is the angle between a segment's first local radius and its next
+two. `jin-mgf[fair=true]` runs the same pass inside `skeletonise-all`.
 
 ---
 
@@ -1430,6 +1517,42 @@ Euler roughly alone; one that welds two unrelated vessels lowers both.
 Closing is indiscriminate — keep `--close` at 1 or 2 and use painting for anything
 longer.
 
+#### `--guarded`: label-preserving repair that tests every addition
+
+```
+python -m hipct_seg_debug.edit repair-mask --guarded --seg $env:HIPCT_SEG --raw $env:HIPCT_RAW `
+  --voxel-um 32.04 --out repaired.labels.am --report repair.json --audit-dir audit
+```
+
+This fills hollow lumens (where only the vessel wall was labelled) and small enclosed
+voids. With `--close-radius`, it also closes small dents. It works one tree at a time, keeps label values
+and the `Materials` block, and writes an `.am` lattice. Every candidate region is
+added only if it passes these checks:
+
+- **Topology.** No new merge or tunnel locally: Δb0 = 0 and Δb1 ≤ 0. A closing patch
+  or a pinhole must also leave the loop count unchanged.
+- **Detour.** A closing may not join voxels that are far apart through the mask.
+- **Slice fills.** A slice-fill region must be enclosed in 3D, or be a hollow core:
+  running along the normals of the slices it is a hole in, inside a ring no thicker
+  than itself. A vessel loop's interior fails this.
+
+See [SKELETONISATION.md §6.3](SKELETONISATION.md#63-guarded-mask-repair).
+
+| flag | default | meaning |
+|---|---|---|
+| `--guarded` | off | the guarded repair; without it the command is unchanged |
+| `--raw DIR` | — | **required**: the audit gallery and recorded intensities are drawn from it |
+| `--voxel-um UM` | — | **required**: maps the segmentation onto `--raw` |
+| `--close-radius N` | 0 | closing radius in voxels; off by default (adds ~3% volume for no topological gain, SKELETONISATION.md §6.3) |
+| `--max-hole-um UM` | 1500 | largest 2D hole filled, as an equivalent radius |
+| `--report PATH` | — | every region's measures and verdict, plus per-tree totals (`.json`) |
+| `--audit-dir DIR` | — | PNGs of the 24 largest accepted and refused regions per kind and reason |
+| `--out PATH` | — | the repaired lattice (`.am`, labels kept) |
+
+`skeletonise-all --mask-repair` runs the same repair on the decoded volume before
+any candidate or score. That is meant for an ROI; for whole trees, repair once and
+pass the repaired lattice as `--seg`.
+
 ---
 
 ### `mask-export` — write the corrected mask back out
@@ -1445,8 +1568,14 @@ python -m hipct_seg_debug.edit mask-export --edits work/edits.npz --out correcte
 | `--field NAME` | `Labels` | field name to write into the `.am` |
 | *plus the six shared segmentation flags* | | |
 
-Label values are **preserved**, not scaled, so an `.am` written here is a drop-in
-replacement for the source lattice. (`repair-mask --out` scales to 0/255, because
+Label values are **preserved**, not scaled, and the source's `Materials` block and
+bounding box are copied across, so an `.am` written here is a drop-in replacement for
+the source lattice: `Left_Tree` and `Right_Tree` keep their names, and everything
+that splits by material reads it exactly as it read the original. A value the block
+does not declare is reported. (Before this, the block was dropped: the labels
+survived but their names did not, and the per-material split fell back to
+connectivity.) `connect --geodesic --out-seg` copies the block the same way, and its
+bridges take the label of the tree they extend rather than always 1. (`repair-mask --out` scales to 0/255, because
 what it writes is a thresholded boolean.)
 
 Measured on LADAF-2024-28: decoding all 2.34 GB and re-encoding gives **37,725,961
@@ -1701,7 +1830,25 @@ python -m hipct_seg_debug.edit optimise-skeleton work/candidate.am \
     --sweep "prune-factor=1,2,3;smooth-um=0,100,200"
 ```
 
-## 13. Tests
+## 13. jin-mgf skeletonisation, end to end
+
+Hand-correct the mask, repair it, skeletonise with `jin-mgf`, prune and simplify, then
+smooth. [JIN_MGF_WORKFLOW.md](JIN_MGF_WORKFLOW.md) has each stage's command-line and GUI
+form; the GUI chain is **Workflows → 13**.
+
+```
+# 1. hand corrections: python -m hipct_seg_debug --voxel-um 32.04 --paint --edits work/edits.npz
+# 2. guarded repair of the mask plus those corrections
+python -m hipct_seg_debug.edit repair-mask --guarded --edits work/edits.npz --raw "$HIPCT_RAW" --voxel-um 32.04     --out work/repaired.labels.am --report work/repair.json --audit-dir work/repair-audit
+# 3. jin-mgf, one tree at a time, on lumen voxels only
+python -m hipct_seg_debug.edit skeletonise-all --seg work/repaired.labels.am --voxel-um 32.04     --algorithms jin-mgf --per-tree --jin-engine sparse --jin-allow-loops --no-score --out-dir work/jin
+# 4. prune spurious and contained leaves, collapse split junctions (dry run without --apply)
+python -m hipct_seg_debug.edit simplify-skeleton work/jin/jin-mgf.am --seg work/repaired.labels.am     --voxel-um 32.04 --apply --out work/jin-mgf_simplified.am
+# 5. smooth each vessel through its junctions, inside the mask
+python -m hipct_seg_debug.edit fair-centreline work/jin-mgf_simplified.am --seg work/repaired.labels.am     --voxel-um 32.04 --out work/jin-mgf_fair.am
+```
+
+## 14. Tests
 
 ```
 python -m pytest                # 460 tests, ~33 s
@@ -2000,7 +2147,7 @@ next may read.
 
 ## Workflows
 
-Workflows 7–11C run as chains. Intermediates go to one directory per run
+Workflows 7–13 (with 8C and 11C) run as chains. Intermediates go to one directory per run
 (`cache/runs/<timestamp>`), and each step's output feeds the next by name rather than
 by scraping the log.
 
@@ -2010,8 +2157,9 @@ finds no collapsed spans, and a chain that trusted the exit code would fail thre
 minutes later with a confusing "file not found". Instead it stops and says so,
 naming the graph that is still current.
 
-Two chains pause deliberately — workflow 9 after its dry run so you can read the
-morphometrics, and workflow 11 at the hand-correction step. Press **Continue**.
+Three chains pause deliberately — workflow 9 after its dry run so you can read the
+morphometrics, workflow 11 at the hand-correction step, and workflow 13 after the
+guarded mask repair so you can read its report and audit gallery. Press **Continue**.
 
 The CFC variants are deliberately additive; workflows 8 and 11 remain unchanged:
 

@@ -110,6 +110,26 @@ class SpatialGraph:
         """(V,) vertex degree from the edge connectivity."""
         return np.bincount(self.connectivity.ravel(), minlength=self.n_vertex)
 
+    def edge_point(self, edge: int, at: float = 0.5) -> tuple[np.ndarray, int]:
+        """The stored point a fraction `at` of the way along `edge`, by arc length.
+
+        Returns ``(xyz, point_index)`` -- a real centreline point, not an
+        interpolation, so the index can be handed to anything that wants one (the
+        3D status line reports its radius and edge). ``at`` is clamped to [0, 1].
+        """
+        edge = int(edge)
+        if not 0 <= edge < self.n_edge:
+            raise IndexError(f"edge {edge} is out of range: this graph has "
+                             f"{self.n_edge} edges (0-{self.n_edge - 1})")
+        lo, hi = self.edge_offsets[edge], self.edge_offsets[edge + 1]
+        if hi <= lo:
+            raise IndexError(f"edge {edge} has no points")
+        pts = self.points[lo:hi]
+        s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))])
+        target = min(max(float(at), 0.0), 1.0) * s[-1]
+        i = int(np.argmin(np.abs(s - target)))
+        return pts[i].astype(np.float64), int(lo + i)
+
 
 def _blocks(text: str) -> dict[int, str]:
     """Split the data section into ``{block_id: raw_text}``."""

@@ -1,6 +1,8 @@
 """Longest-path-first joint fitting, retaining earlier curves outside junctions."""
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 
 from .centreline_refine import arclength
@@ -8,11 +10,28 @@ from .dfs_paths import path_samples
 from .junction_cluster import fit_cluster
 
 
+def _fit_inputs(graph, main, held):
+    """Fingerprint of everything a fit of `main` reads that an earlier fit can change.
+
+    Observations are fixed for the whole call, so geometry is what varies: the run's
+    own segments and every segment incident to its nodes (their released spans),
+    plus which of its nodes an earlier fit has since frozen.
+    """
+    nodes = {graph.segment(sid)[key] for sid in main for key in ('node1', 'node2')}
+    touched = sorted(set(main) | {s for n in nodes for s in graph.node_segments(n)})
+    digest = hashlib.sha1(repr((tuple(main), sorted(nodes & held))).encode())
+    for sid in touched:
+        digest.update(np.ascontiguousarray(graph.coords(sid)).tobytes())
+    return digest.hexdigest()
+
+
 def fit_paths(graph, paths, selected, observations, scales, sampler, frame, strength, held,
               progress=None, section_weighting=False):
     selected, held, processed = set(selected), set(held), set()
     reports = {}
-    failed_at, revision = {}, 0
+    # A failed run is retried only when a later accepted fit changed its inputs, not
+    # after any accepted fit anywhere (the 3717 run re-solved one cluster six times).
+    failed = set()
     spacing = float(frame.seg_spacing[0])
     for path in paths:
         # A regional selection can intersect a path in several disjoint runs.
@@ -26,8 +45,8 @@ def fit_paths(graph, paths, selected, observations, scales, sampler, frame, stre
         if run:
             runs.append(run)
         for main in runs:
-            key = tuple(main)
-            if failed_at.get(key) == revision:
+            key = _fit_inputs(graph, main, held)
+            if key in failed:
                 continue
             coords, refs = path_samples(graph, path, main)
             good = np.array([i in observations[sid][2] for sid, i in refs])
@@ -37,7 +56,7 @@ def fit_paths(graph, paths, selected, observations, scales, sampler, frame, stre
             if good.sum() < 2 or np.ptp(path_s[good]) < 1e-9:
                 reports[len(reports)] = dict(base, status='insufficient_support', nodes=[],
                     segments=main, supported_segments=[], reason='path_has_fewer_than_two_distinct_sections')
-                failed_at[key] = revision
+                failed.add(key)
                 if progress:
                     progress(dict(path_terminal=path['terminal'], new_segments=main,
                                   status='insufficient_support'))
@@ -79,10 +98,18 @@ def fit_paths(graph, paths, selected, observations, scales, sampler, frame, stre
             reports[len(reports)] = result
             if progress:
                 progress(dict(path_terminal=path['terminal'], new_segments=main,
-                              status=result['status'], max_move_um=result.get('max_move_um', 0.)))
+                              status=result['status'], max_move_um=result.get('max_move_um', 0.),
+                              **({'blocked_detail': result['blocked_detail']}
+                                 if 'blocked_detail' in result else {})))
             if result['status'] in ('moving', 'stationary'):
                 processed.update(main)
-                revision += 1
+                # Longest path first: a later path attaches to a junction an earlier
+                # fit has placed, instead of moving it again from its own subset of
+                # sections. Two overlapping fits otherwise pull the same node to
+                # different places every iteration (node 636 on region 318 diverged
+                # from 14 to 103 um with frozen sections). It may move again in the
+                # next iteration's first fit.
+                held.update(movable)
             else:
-                failed_at[key] = revision
+                failed.add(key)
     return reports

@@ -50,6 +50,10 @@ Issues = "https://github.com/ak-234/HiP-CT-vascular-toolkit/issues"
 [project.scripts]
 coronary-sdf = "coronary_sdf.__main__:main"
 coronary-sdf-benchmark = "coronary_sdf.benchmark:main"
+coronary-rcr = "coronary_sdf.rcr.__main__:main"
+
+[tool.setuptools.package-data]
+"coronary_sdf.rcr" = ["fortran/*/*.F", "THIRD_PARTY.md"]
 
 [tool.setuptools]
 include-package-data = false

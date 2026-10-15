@@ -135,6 +135,39 @@ class MaskEdits:
         self._bump([k])
         return len(rows)
 
+    def drop(self, k: int, rows, cols) -> int:
+        """Forget the edits at ``(rows, cols)`` on plane `k`, so the source shows through.
+
+        Not the same as writing the source value back: that leaves an entry that
+        restates the lattice, which ``stats`` would then count as a correction.
+        """
+        plane = self._planes.get(int(k))
+        if not plane:
+            return 0
+        gone = 0
+        for flat in self._flat(np.atleast_1d(rows), np.atleast_1d(cols)).tolist():
+            if plane.pop(int(flat), None) is not None:
+                gone += 1
+        if gone:
+            self._cache.pop(int(k), None)
+            self._bump([k])
+        return gone
+
+    def entries(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Every edit as ``(k, row, col, value)`` columns, plane by plane."""
+        ks, rows, cols, vals = [], [], [], []
+        for k in self.touched_planes:
+            idx, val = self._arrays(k)
+            ks.append(np.full(len(idx), k, dtype=np.int64))
+            rows.append(idx // self.nx)
+            cols.append(idx % self.nx)
+            vals.append(val)
+        if not ks:
+            empty = np.empty(0, dtype=np.int64)
+            return empty, empty, empty, np.empty(0, dtype=np.uint8)
+        return (np.concatenate(ks), np.concatenate(rows), np.concatenate(cols),
+                np.concatenate(vals))
+
     def clear(self) -> None:
         touched = list(self._planes)
         self._planes.clear()

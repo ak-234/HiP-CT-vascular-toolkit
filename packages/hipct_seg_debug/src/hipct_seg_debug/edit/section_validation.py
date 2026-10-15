@@ -7,6 +7,7 @@ into the preceding vessel as a spherical capsule would.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -14,6 +15,46 @@ from scipy.spatial import cKDTree
 
 REJECTION_REASONS = ('target_obliquity', 'neighbouring_lumen_contamination',
                      'unstable_section', 'truncation', 'insufficient_support')
+
+# Treat a junction's through-vessel -- the pair of branches that continue nearly
+# straight with similar calibre -- as one vessel for ownership. 3655 lies wholly
+# within a flattened junction confluence; its calibre-matched continuation 3641
+# (ratio 0.98) otherwise contaminates every 3655 section. On by default; set
+# HIPCT_THROUGH_JUNCTIONS=0 to disable. Environment-driven so spawned section
+# workers inherit it.
+THROUGH_JUNCTIONS = os.environ.get("HIPCT_THROUGH_JUNCTIONS", "1") != "0"
+THROUGH_MIN_CALIBRE_RATIO = 0.75
+THROUGH_MIN_STRAIGHTNESS = np.cos(np.radians(45.))
+
+
+def _through_pair(graph, nid, incident):
+    """The incident pair continuing nearly straight with matching calibre, if any."""
+    from .skeleton_optimise import _radius_away
+    out = {}
+    for sid in incident:
+        x = graph.coords(sid)
+        if len(x) < 2:
+            continue
+        if graph.segment(sid)["node2"] == nid:
+            x = x[::-1]
+        r = _radius_away(graph, sid, nid)
+        # Direction leaving the node, over about two local radii.
+        s = np.r_[0., np.cumsum(np.linalg.norm(np.diff(x, axis=0), axis=1))]
+        k = int(np.clip(np.searchsorted(s, 2 * max(r, 1e-6)), 1, len(x) - 1))
+        d = x[k] - x[0]
+        if np.linalg.norm(d) > 0 and np.isfinite(r) and r > 0:
+            out[sid] = (d / np.linalg.norm(d), r)
+    best = None
+    ids = sorted(out)
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            (da, ra), (db, rb) = out[a], out[b]
+            straight = float(-(da @ db))
+            ratio = min(ra, rb) / max(ra, rb)
+            if straight >= THROUGH_MIN_STRAIGHTNESS and ratio >= THROUGH_MIN_CALIBRE_RATIO:
+                if best is None or straight > best[0]:
+                    best = (straight, a, b)
+    return None if best is None else (best[1], best[2])
 
 
 @dataclass
@@ -61,6 +102,10 @@ class SectionContext:
             incident = sorted(graph.node_segments(nid))
             if len(incident) == 2:
                 parent[root(incident[1])] = root(incident[0])
+            elif len(incident) >= 3 and THROUGH_JUNCTIONS:
+                pair = _through_pair(graph, nid, incident)
+                if pair is not None:
+                    parent[root(pair[1])] = root(pair[0])
         self.continuation = {sid: root(sid) for sid in parent}
         records, arcs = [], []
         self.end_support, self.lengths = {}, {}
