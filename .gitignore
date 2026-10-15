@@ -17,6 +17,7 @@ env/
 # ── Caches / tooling ─────────────────────────────────────────────────────────
 .pytest_cache/
 .pytest_*/
+.rcr-tests-*/
 .mypy_cache/
 .ruff_cache/
 .coverage
