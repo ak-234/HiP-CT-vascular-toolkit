@@ -17,6 +17,7 @@ from scipy.interpolate import BSpline
 from scipy.sparse.linalg import spsolve
 
 from ..crosssection import _PlaneSampler, robust_edge_tangents, stable_transverse_cut
+from ..frame import is_isotropic
 from .interpolation import mask_for_segment
 from .radius_perimeter import _BranchContext as _BranchContext, _rival_lies_in_blob
 from .section_validation import SectionContext
@@ -281,6 +282,46 @@ def _section_work(sid, audit=False):
     return sid, result, diagnostics, time.monotonic()-start
 
 
+SECTION_POOL_RETRIES = 2
+
+
+def _section_results(sids, workers, initargs, audit=False, retries=SECTION_POOL_RETRIES):
+    """Yield `_section_work(sid, audit)` for every segment, in completion order.
+
+    One spawn worker dying breaks the whole pool. On LADAF-2021-17 a worker failed
+    at start-up in iteration 7 of 8 (`OSError: [WinError 6]` releasing the call
+    queue's semaphore) and took six hours of refinement with it. Results already
+    returned are kept, and the rest go to a fresh pool, up to `retries` times.
+    Each result depends only on `initargs` and the segment, so a retry is the
+    same computation.
+    """
+    from concurrent.futures.process import BrokenProcessPool
+    remaining = list(sids)
+    for attempt in range(retries + 1):
+        done, broken = set(), None
+        with ProcessPoolExecutor(max_workers=min(workers, len(remaining)),
+                mp_context=multiprocessing.get_context('spawn'),
+                initializer=_init_section_worker, initargs=initargs) as processes:
+            futures = [processes.submit(_section_work, sid, audit) for sid in remaining]
+            # Drain every future: ones that finished before the break still hold results.
+            for future in as_completed(futures):
+                try:
+                    out = future.result()
+                except BrokenProcessPool as error:
+                    broken = error
+                    continue
+                done.add(out[0])
+                yield out
+        remaining = [sid for sid in remaining if sid not in done]
+        if broken is None or not remaining:
+            return
+        if attempt == retries:
+            raise broken
+        import sys
+        print(f"section worker pool broke; resubmitting {len(remaining)} segment(s) "
+              f"to a new pool (retry {attempt+1} of {retries})", file=sys.stderr, flush=True)
+
+
 def _crosses_section(graph, sid, origin, tangent, cut, spacing):
     """A rival must actually intersect this plane, not merely project into it.
 
@@ -524,8 +565,9 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
     if (workers < 1 or max_iterations < 1 or max_samples < 4 or max_half < 4
             or not np.isfinite(strength) or strength <= 0):
         raise ValueError("invalid refinement parameters")
-    if not np.allclose(frame.seg_spacing, frame.seg_spacing[0], rtol=1e-6):
-        raise ValueError("cross-section refinement currently requires isotropic voxels")
+    if not is_isotropic(frame.seg_spacing):
+        raise ValueError("cross-section refinement currently requires isotropic voxels "
+                         f"(segmentation spacing {np.round(frame.seg_spacing, 5)} um)")
     t0 = time.monotonic()
     sids = list(graph.segment_ids()) if sids is None else sorted(set(map(int, sids)))
     if any(not graph.has_segment(sid) for sid in sids):
@@ -598,19 +640,19 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
 
             if process_sections and pending:
                 lattice = (labels.path, labels.field, labels.dims, getattr(labels, '_cache_dir', None))
-                with ProcessPoolExecutor(max_workers=min(workers, len(pending)),
-                        mp_context=multiprocessing.get_context('spawn'),
-                        initializer=_init_section_worker,
-                        initargs=(graph.triple, frame, lattice, scale, max_half, max_samples,
-                                  coherent, shape_aware, tangent_hints, dense_sids)) as processes:
-                    futures = [processes.submit(_section_work, sid) for sid in pending]
-                    for future in as_completed(futures):
-                        sid, result, diagnostics, seconds = future.result()
-                        observations[sid] = result
-                        section_diagnostics[sid] = diagnostics
-                        if section_progress:
-                            section_progress(dict(iteration=iteration+1, segment=sid,
-                                                  accepted_sections=len(result[2]), seconds=seconds))
+                initargs = (graph.triple, frame, lattice, scale, max_half, max_samples,
+                            coherent, shape_aware, tangent_hints, dense_sids)
+                # Longest segments first: the phase ends when the slowest one does,
+                # and submitted in id order the long ones were left for last -- on
+                # LADAF-2021-17, 14 of 40 workers busy for the final 25 segments.
+                # Results are keyed by segment, so the order changes nothing else.
+                order = sorted(pending, key=lambda s: -len(before[s]))
+                for sid, result, diagnostics, seconds in _section_results(order, workers, initargs):
+                    observations[sid] = result
+                    section_diagnostics[sid] = diagnostics
+                    if section_progress:
+                        section_progress(dict(iteration=iteration+1, segment=sid,
+                                              accepted_sections=len(result[2]), seconds=seconds))
             elif pending:
                 observations.update(pool.map(work, pending))
             if section_cache is not None:
@@ -842,15 +884,12 @@ def refine(graph, frame, labels, *, method="centroid-spline", sids=None,
         def audits():
             if process_sections and sids:
                 lattice = (labels.path, labels.field, labels.dims, getattr(labels, '_cache_dir', None))
-                with ProcessPoolExecutor(max_workers=min(workers, len(sids)),
-                        mp_context=multiprocessing.get_context('spawn'),
-                        initializer=_init_section_worker,
-                        initargs=(graph.triple, frame, lattice, scale, max_half, max_samples,
-                                  True, True, {}, dense_sids)) as processes:
-                    futures = [processes.submit(_section_work, sid, True) for sid in sids]
-                    for future in as_completed(futures):
-                        sid, _, diagnostics, seconds = future.result()
-                        yield sid, diagnostics, seconds
+                initargs = (graph.triple, frame, lattice, scale, max_half, max_samples,
+                            True, True, {}, dense_sids)
+                longest = sorted(sids, key=lambda s: -len(graph.coords(s)))  # as above
+                for sid, _, diagnostics, seconds in _section_results(longest, workers, initargs,
+                                                                     audit=True):
+                    yield sid, diagnostics, seconds
             else:
                 final_context = SectionContext(graph)
                 for sid in sids:

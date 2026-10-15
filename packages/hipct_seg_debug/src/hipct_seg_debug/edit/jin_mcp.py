@@ -95,12 +95,23 @@ class JinSkeleton:
     report: dict
 
 
-def extract(membership, *, root_zyx=None, max_voxels=2_000_000, max_iterations=256):
+def extract(membership, *, root_zyx=None, max_voxels=2_000_000, max_iterations=256,
+            medialness=None, marker=None, allow_loops=False):
     """Extract one connected tree on an isotropic grid, with bounded ROI size.
 
     All candidate paths in a round share the same cost/predecessor map and
     marked-volume snapshot (section 2.5). Only traced edges are exported: adding
     all adjacencies between skeleton voxels would introduce spurious loops.
+
+    Two hooks exist for :mod:`~.jin_mgf`; left as ``None`` the method is exactly the
+    published one. `medialness(mask, fdt, lsf) -> xi` replaces LSF in the Eq. 6 step
+    cost, the significance sum and the endpoint candidates (``xi > 0.5`` as well as
+    strong quench). `marker(paths, fdt, mask) -> bool array` is OR-ed into the marked
+    volume after the paper's 2 x FDT dilation, for each round's accepted paths.
+
+    `allow_loops` skips the Euler-characteristic guard; the output is still a tree,
+    loops in the mask being cut. :mod:`~.jin_sparse` is the same method for inputs
+    beyond `max_voxels`.
     """
     raw = np.asarray(membership)
     if raw.ndim != 3 or raw.size == 0:
@@ -117,9 +128,11 @@ def extract(membership, *, root_zyx=None, max_voxels=2_000_000, max_iterations=2
     if count != 1:
         raise ValueError('Jin MCP requires one nonempty connected component; use --per-tree')
     from skimage.measure import euler_number
-    if euler_number(mask, connectivity=3) != 1:
+    if not allow_loops and euler_number(mask, connectivity=3) != 1:
         raise ValueError('Jin MCP tree-like-input check failed (Euler characteristic != 1); inspect tunnels/cavities')
     fdt, lsf = fields(mu)
+    xi = lsf if medialness is None else np.asarray(medialness(mask, fdt, lsf), dtype=np.float64)
+    strong = lsf > .5 if medialness is None else (lsf > .5) & (xi > .5)
     if root_zyx is None:
         root = int(np.argmax(fdt))
     else:
@@ -143,11 +156,11 @@ def extract(membership, *, root_zyx=None, max_voxels=2_000_000, max_iterations=2
         seeds = np.flatnonzero(marked)
         gd, _ = _distances(mu, OFFSETS, LENGTHS, seeds, np.zeros(len(seeds)), lsf, 0)
         seeds = np.array(sorted(skeleton), dtype=np.int64)
-        _, previous = _distances(mu, OFFSETS, LENGTHS, seeds, np.zeros(len(seeds)), lsf, 2)
+        _, previous = _distances(mu, OFFSETS, LENGTHS, seeds, np.zeros(len(seeds)), xi, 2)
         branches = []
         decisions = []
         # Group strong quench candidates once; avoid one full-volume scan per subtree.
-        candidates = np.flatnonzero((lsf > .5) & ~marked)
+        candidates = np.flatnonzero(strong & ~marked)
         groups = {}
         for p in candidates:
             label = int(labels.ravel()[p])
@@ -161,7 +174,7 @@ def extract(membership, *, root_zyx=None, max_voxels=2_000_000, max_iterations=2
                 if q < 0:
                     raise RuntimeError('Disconnected minimum-cost path')
                 path.append(q)
-            score = float(sum(lsf.ravel()[p] for p in path if not marked.ravel()[p]))
+            score = float(sum(xi.ravel()[p] for p in path if not marked.ravel()[p]))
             threshold = 3 + .5 * float(fdt.ravel()[path[-1]])
             accepted = score > threshold
             decisions.append(dict(component=label, endpoint_zyx=list(map(int, np.unravel_index(endpoint, mu.shape))),
@@ -184,6 +197,8 @@ def extract(membership, *, root_zyx=None, max_voxels=2_000_000, max_iterations=2
         seeds = np.array(sorted(added), dtype=np.int64)
         dilation, _ = _distances(mu, OFFSETS, LENGTHS, seeds, -2 * fdt.ravel()[seeds], lsf, 0, 0.)
         marked |= dilation <= 0
+        if marker is not None:
+            marked |= np.asarray(marker(branches, fdt, mask), dtype=bool)
         if np.all(marked[mask]):
             break
     else:

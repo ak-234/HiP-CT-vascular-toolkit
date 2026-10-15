@@ -151,7 +151,9 @@ def test_roi_decoder_only_reads_window_and_adjusts_frame(monkeypatch):
 
     labels = Labels()
     monkeypatch.setattr(cli, '_open_lattice', lambda _: (labels, make_frame((1000,)*3), 'fake.am'))
+    # The decode-time guard is the dense engine's; the sparse one handles whole trees.
     args = cli.build_parser().parse_args(['skeletonise-all', '--algorithms', 'jin-mcp',
+                                         '--jin-engine', 'dense',
                                          '--roi-zyx', '10', '13', '20', '24', '30', '35'])
     volume, frame, _, _ = cli._decoded(args)
     assert volume.shape == (3, 4, 5)

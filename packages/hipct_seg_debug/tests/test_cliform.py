@@ -33,7 +33,7 @@ NINE = (
     # Diagnostics: they report on a written graph rather than editing one, and are
     # declared beside the pass whose output they explain.
     "segment-diagnosis", "junction-mask", "reformat-radius", "ostium-flare",
-    "refine-centreline", "prepare-reconstruction", "simplify-skeleton",
+    "refine-centreline", "prepare-reconstruction", "simplify-skeleton", "fair-centreline",
     "radius-perimeter", "crop",
     # Interactive, and declared beside `crop` because it feeds the same `--root-edge`.
     "pick-roots",

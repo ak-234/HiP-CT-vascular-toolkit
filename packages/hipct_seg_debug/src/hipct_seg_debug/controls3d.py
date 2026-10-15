@@ -171,12 +171,32 @@ def build_layer_panel(picker):
     stride.valueChanged.connect(_stride_changed)
     rebuild.clicked.connect(_rebuild)
 
+    # Edge ids come from the status line and from every command-line report; this is
+    # the way back from one of those numbers to the place it names.
+    edge_label = QLabel("go to edge")
+    edge_id = QSpinBox()
+    edge_id.setRange(0, 1_000_000_000)
+    edge_id.setToolTip("Graph edge id, as the status line shows it. Picks its midpoint,\n"
+                       "flies the camera there and opens the slice browser.")
+    edge_go = QPushButton("go")
+    grid.addWidget(edge_label, len(LAYERS) + 4, 0)
+    grid.addWidget(edge_id, len(LAYERS) + 4, 1)
+    grid.addWidget(edge_go, len(LAYERS) + 4, 2)
+
+    def _goto_edge():
+        try:
+            picker.goto_edge(int(edge_id.value()))
+        except Exception as exc:  # noqa: BLE001 - an escaping slot exception aborts Qt
+            print(f"[layers] go to edge failed: {type(exc).__name__}: {exc}")
+
+    edge_go.clicked.connect(_goto_edge)
+
     hint = QLabel("'i' and 'g' toggle the two overlays from the 3D view;\n"
                   "the checkboxes here are the same state. Radius circles\n"
                   "are graph-wide; the three shape rows need 'v'.")
     hint.setStyleSheet("color: #808090;")
-    grid.addWidget(hint, len(LAYERS) + 4, 0, 1, 3)
-    grid.setRowStretch(len(LAYERS) + 5, 1)
+    grid.addWidget(hint, len(LAYERS) + 5, 0, 1, 3)
+    grid.setRowStretch(len(LAYERS) + 6, 1)
 
     def refresh():
         """Re-read the picker and update the widgets.

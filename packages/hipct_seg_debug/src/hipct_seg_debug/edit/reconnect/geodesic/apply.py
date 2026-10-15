@@ -158,29 +158,42 @@ def _completion_voxels(candidate) -> np.ndarray:
     return np.asarray(candidate.route.path_zyx, dtype=np.int64)
 
 
-def paint(source, voxels_zyx) -> tuple[int, list[int]]:
+def paint(source, voxels_zyx, value=None) -> tuple[int, list[int]]:
     """Set `voxels_zyx` in the mask edit store. Returns ``(n_set, planes)``.
 
     Only voxels that are not already foreground are written, so the store records
     the repair rather than a restatement of the mask -- which is what makes
     :func:`revert` able to remove exactly what was added.
+
+    `value` is the label to write. ``None`` takes the majority label among the
+    voxels that are already foreground -- the intact ends the completion overlaps --
+    so a bridge in Right_Tree is not stamped as Left_Tree. Only when nothing it
+    touches is labelled does it fall back to 1.
     """
     voxels = np.asarray(voxels_zyx, dtype=np.int64).reshape(-1, 3)
     if not len(voxels):
         return 0, []
     edits = source.edits
-    added = 0
-    planes: list[int] = []
+    by_plane = []
+    held = []
     for z in np.unique(voxels[:, 0]):
         rows = voxels[voxels[:, 0] == z]
-        plane = np.asarray(source.slice_z(int(z)))
-        fresh = plane[rows[:, 1], rows[:, 2]] == 0
+        current = np.asarray(source.slice_z(int(z)))[rows[:, 1], rows[:, 2]]
+        by_plane.append((int(z), rows, current))
+        held.append(current[current > 0])
+    if value is None:
+        held = np.concatenate(held) if held else np.empty(0, dtype=np.uint8)
+        value = int(np.bincount(held).argmax()) if held.size else 1
+    added = 0
+    planes: list[int] = []
+    for z, rows, current in by_plane:
+        fresh = current == 0
         if not fresh.any():
             continue
         target = rows[fresh]
-        added += edits.set_plane(int(z), target[:, 1], target[:, 2],
-                                 np.ones(len(target), dtype=np.uint8))
-        planes.append(int(z))
+        added += edits.set_plane(z, target[:, 1], target[:, 2],
+                                 np.full(len(target), value, dtype=np.uint8))
+        planes.append(z)
     return added, planes
 
 
@@ -197,7 +210,7 @@ def revert(source, voxels_zyx) -> int:
     return cleared
 
 
-def write_segmentation(path, source, frame, *, progress=None) -> dict:
+def write_segmentation(path, source, frame, *, progress=None, extra: str = "") -> dict:
     """Write the repaired mask as a fresh ``HxByteRLE`` lattice.
 
     Decodes the whole volume, which is the honest cost of the format: the codec is
@@ -207,6 +220,9 @@ def write_segmentation(path, source, frame, *, progress=None) -> dict:
     The bounding box is taken from the frame rather than copied from the input
     header, so a mask written here describes its own geometry and cannot silently
     inherit a stale one.
+
+    `extra` is header text to carry across -- the source's ``Materials`` block, so
+    Left_Tree and Right_Tree keep their names.
     """
     from ...lattice import decode_volume
 
@@ -219,7 +235,7 @@ def write_segmentation(path, source, frame, *, progress=None) -> dict:
     hi = origin + (dims - 1) * spacing
     bbox = np.empty(6, dtype=np.float64)
     bbox[0::2], bbox[1::2] = origin, hi
-    return write_lattice(path, volume, bbox)
+    return write_lattice(path, volume, bbox, extra=extra)
 
 
 # ---------------------------------------------------------------------- the graph

@@ -1,6 +1,6 @@
-"""The twelve workflows from CLI.md, as data a button can run.
+"""The workflows from CLI.md Part 3, as data a button can run.
 
-Five of them are command chains and can genuinely be one click. The other six are
+The numbered chains (7-13) are command chains and can genuinely be one click. The other six are
 "open the viewer and look", which no runner can perform on your behalf -- so they are
 `Setup` entries that configure the live session and tell you what to do next, and
 they are labelled as such rather than dressed up as commands.
@@ -184,6 +184,44 @@ _W12 = (
          note="the five terms again, to confirm the refinement improved them"),
 )
 
+# The chain run on LADAF-2021-17 (docs/JIN_MGF_WORKFLOW.md). Every step after the
+# repair names the repaired lattice, not the session's: skeletonising the unrepaired
+# mask would quietly undo the first step.
+_JIN_SEG = "{run}/repaired.labels.am"
+_W13 = (
+    Step("repair-mask", {"guarded": True, "seg": "{seg}", "edits": "{edits}",
+                         "raw": "{raw}", "voxel_um": "{voxel_um}", "out": _JIN_SEG,
+                         "report": "{run}/repair.json",
+                         "audit_dir": "{run}/repair-audit"},
+         note="guarded repair of the mask plus any painted corrections: fills hollow "
+              "lumens and enclosed voids, and refuses anything that would merge two "
+              "vessels or open a loop"),
+    Step("", pause=True,
+         note="Read repair.json and the repair-audit gallery in the run directory.\n"
+              "If a vessel still has a notch or a fusion, fix it in the paint panel\n"
+              "(Fill collapsed lumen / Split fused vessels), Save edits, and start the\n"
+              "chain again. Otherwise continue to skeletonise."),
+    Step("skeletonise-all", {"seg": _JIN_SEG, "voxel_um": "{voxel_um}",
+                             "algorithms": "jin-mgf", "per_tree": True,
+                             "jin_engine": "sparse", "jin_allow_loops": True,
+                             "no_score": True, "out_dir": "{run}/jin",
+                             "summary_json": "{run}/jin/summary.json"},
+         outputs=("out_dir",),
+         note="jin-mgf on each tree, on lumen voxels only. Loops in the mask are cut; "
+              "the output is a tree with FDT placeholder radii"),
+    Step("simplify-skeleton", {"graph": "{run}/jin/jin-mgf.am", "seg": _JIN_SEG,
+                               "voxel_um": "{voxel_um}", "apply": True,
+                               "out": "{run}/jin-mgf_simplified.am",
+                               "report_json": "{run}/simplify.json"},
+         note="prune spurious leaves (short ones, and medial-sheet spurs lying inside "
+              "another vessel), then collapse short inner links into one junction"),
+    Step("fair-centreline", {"seg": _JIN_SEG, "voxel_um": "{voxel_um}",
+                             "out": "{run}/jin-mgf_fair.am"},
+         feeds={"graph": "out"},
+         note="smooth each vessel as one curve through its junctions, inside the "
+              "mask; radii are not changed"),
+)
+
 
 WORKFLOWS: tuple[Workflow, ...] = (
     Workflow(
@@ -262,6 +300,15 @@ WORKFLOWS: tuple[Workflow, ...] = (
         "That last step is the one that fixes the thickness values: Avizo's come from "
         "a single global fit whose local error runs to a factor of two.",
         _W12,
+    ),
+    Workflow(
+        "jin-mgf", "13. jin-mgf centreline, end to end",
+        "Guarded mask repair (with any painted corrections), a pause to review it, "
+        "jin-mgf skeletonisation per tree, spurious-branch pruning and junction "
+        "simplification, then smoothing through the junctions. Needs the session's "
+        "raw folder and --voxel-um. Load jin-mgf_fair.am when it finishes. On "
+        "LADAF-2021-17 the skeletonisation is the long step (tens of minutes).",
+        _W13,
     ),
 )
 
@@ -342,6 +389,10 @@ def resolve(step: Step, context: dict, previous: dict | None) -> dict:
         key: value.format(**context) if isinstance(value, str) else value
         for key, value in step.values.items()
     }
+    # A placeholder the session cannot fill (no `--edits`, no `--voxel-um`) means
+    # "don't pass the flag", so the command reports what is missing in its own words
+    # rather than a numeric field failing to parse "".
+    values = {key: value for key, value in values.items() if value != ""}
     for dest, source in (step.feeds or {}).items():
         if previous is None:
             raise ValueError(f"{step.command}.{dest} feeds from a step that does not exist")
@@ -507,6 +558,8 @@ def default_context(session_args, run_dir) -> dict:
         "seg": getattr(session_args, "seg", "") or "",
         "edits": getattr(session_args, "edits", "") or "",
         "raw": getattr(session_args, "raw", "") or "",
+        "voxel_um": (str(session_args.voxel_um)
+                     if getattr(session_args, "voxel_um", None) is not None else ""),
         "cfc_model": getattr(session_args, "cfc_model", "")
                      or os.environ.get("HIPCT_CFC_MODEL", ""),
         "cfc_python": getattr(session_args, "cfc_python", "")

@@ -19,6 +19,19 @@ import numpy as np
 
 MM_TO_UM = 1000.0
 
+#: How far apart three voxel sizes may be and still count as one. An Amira bounding box
+#: is written in float32 from a single voxel size, so its axes disagree by rounding:
+#: LADAF-2021-17's 32.04um labels give 32.98999 / 32.99001 / 32.99010 um, 3e-6 apart.
+#: The same tolerance as ``reformat.VOXEL_ISOTROPY_RTOL``.
+VOXEL_ISOTROPY_RTOL = 1e-3
+
+
+def is_isotropic(spacing) -> bool:
+    """Whether a (3,) spacing is one finite, positive size to within the rounding above."""
+    v = np.asarray(spacing, dtype=np.float64).reshape(-1)
+    return bool(np.all(np.isfinite(v)) and v.min() > 0
+                and np.ptp(v) <= VOXEL_ISOTROPY_RTOL * float(v.mean()))
+
 
 @dataclass
 class Check:
@@ -379,7 +392,10 @@ def validate(
     # 3. The segmentation lattice fits inside the raw stack.
     raw_hi = frame.raw_extent_um
     seg = frame.seg_bbox_um
-    inside_raw = bool(np.all(seg[0::2] >= -1e-6) and np.all(seg[1::2] <= raw_hi + 1e-6))
+    # A thousandth of a voxel, not a fixed 1e-6 um: Amira writes the bounding box in
+    # float32, and LADAF-2021-17's x minimum reads back as -1.9e-6 um -- zero, rounded.
+    edge_tol = 1e-3 * float(np.max(frame.seg_spacing))
+    inside_raw = bool(np.all(seg[0::2] >= -edge_tol) and np.all(seg[1::2] <= raw_hi + edge_tol))
     checks.append(
         Check(
             "segmentation within raw stack",
@@ -451,20 +467,24 @@ def validate(
             "z-flip": np.column_stack([ijk[:, 0], ijk[:, 1], nz - 1 - ijk[:, 2]]),
             "xy-swap": np.column_stack([ijk[:, 1], ijk[:, 0], ijk[:, 2]]),
         }
-        # Decode each needed z slice once.
-        fracs = {}
-        for name, v in variants.items():
-            ok = np.all((v >= 0) & (v < [nx, ny, nz]), axis=1)
-            v = v[ok]
-            hits = 0
-            order = np.argsort(v[:, 2])
-            v = v[order]
-            zs = v[:, 2]
-            for z in np.unique(zs):
-                sl = labels.slice_z(int(z))
-                sub = v[zs == z]
-                hits += int((sl[sub[:, 1], sub[:, 0]] > 0).sum())
-            fracs[name] = 100.0 * hits / max(len(ijk), 1)
+        # Decode each needed z slice once, for every variant together. Per variant,
+        # a whole-heart graph touching ~4,000 slices cost five times that in decodes
+        # of a 10 MB plane -- minutes before the viewer window opened.
+        names = list(variants)
+        stacked = []
+        for k, name in enumerate(names):
+            v = variants[name]
+            v = v[np.all((v >= 0) & (v < [nx, ny, nz]), axis=1)]
+            stacked.append(np.column_stack([v, np.full(len(v), k)]))
+        q = np.concatenate(stacked) if stacked else np.zeros((0, 4), dtype=np.int64)
+        q = q[np.argsort(q[:, 2], kind="stable")]
+        hits = np.zeros(len(names), dtype=np.int64)
+        bounds = np.flatnonzero(np.diff(q[:, 2])) + 1
+        for sub in np.split(q, bounds) if len(q) else []:
+            sl = labels.slice_z(int(sub[0, 2]))
+            inside = sl[sub[:, 1], sub[:, 0]] > 0
+            hits += np.bincount(sub[:, 3], weights=inside, minlength=len(names)).astype(np.int64)
+        fracs = {name: 100.0 * int(hits[k]) / max(len(ijk), 1) for k, name in enumerate(names)}
 
         direct = fracs["direct"]
         worst_flip = max(v for k, v in fracs.items() if k != "direct")

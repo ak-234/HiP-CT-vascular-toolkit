@@ -17,7 +17,10 @@ import numpy as np
 from scipy import ndimage
 
 # Layer draw order is bottom-to-top; keep the greyscale underneath everything.
-SEG_COLOR = {1: "#00b0ff"}
+# One entry per label value. Avizo writes the material *index* into the voxels, so
+# a mask with Left_Tree and Right_Tree holds 1 and 2; a colormap with only 1 in it
+# draws the whole right coronary transparent.
+SEG_COLOR = {1: "#00b0ff", 2: "#b388ff"}
 STL_COLOR = "#ff3b30"
 SKEL_COLOR = "#ffd400"
 CIRCLE_COLOR = "#00e676"
@@ -26,7 +29,7 @@ TUBE_COLOR = {1: "#c158dc"}
 # A deliberately different blue from SEG_COLOR: the whole-volume mask and the
 # slab's mask overlap wherever the slab is, and telling them apart is the point
 # of showing both.
-SEG_ALL_COLOR = {1: "#4dd0e1"}
+SEG_ALL_COLOR = {1: "#4dd0e1", 2: "#ce93d8"}
 
 
 @dataclass
@@ -586,7 +589,7 @@ def _add_volume_layers(viewer, volume, contrast) -> None:
             opacity=0.35,
             visible=False,
             colormap=napari.utils.DirectLabelColormap(
-                color_dict={None: "transparent", 1: SEG_ALL_COLOR[1]}
+                color_dict={None: "transparent", **SEG_ALL_COLOR}
             ),
         )
 
@@ -653,9 +656,9 @@ def _expected_names(slab: Slab, volume=None, paint=None) -> set:
     if volume is not None:
         names.update(volume.names)
     if paint is not None:
-        from .edit.paint import PAINT_LAYER
+        from .edit.paint import layer_names
 
-        names.add(PAINT_LAYER)
+        names.update(layer_names())
     return names
 
 
@@ -701,7 +704,7 @@ def _create_layers(viewer, slab: Slab, volume=None, paint=None):
             # colours over identical anatomy, and only one of them can be changed.
             visible=paint is None,
             colormap=napari.utils.DirectLabelColormap(
-                color_dict={None: "transparent", 1: SEG_COLOR[1]}
+                color_dict={None: "transparent", **SEG_COLOR}
             ),
         )
 

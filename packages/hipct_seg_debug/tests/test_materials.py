@@ -256,34 +256,50 @@ def test_the_foreground_is_labelled_once_however_many_materials(monkeypatch):
 
 
 def test_only_a_component_that_really_straddles_is_re_labelled(monkeypatch):
-    """And it is re-labelled inside its own box, not over the volume."""
+    """And it is re-labelled inside its own box, not over the volume.
+
+    The whole-volume labelling is `segmentation.components` (cc3d); the per-box
+    re-labelling of a straddling component is `ndimage.label`. Both are counted.
+    """
     from scipy import ndimage
 
-    windows = []
-    real = ndimage.label
+    from hipct_seg_debug.edit.reconnect import segmentation
+
+    whole, windows = [], []
+    real_whole, real = segmentation.components, ndimage.label
+
+    def counted_whole(mask, connectivity=3):
+        whole.append(np.asarray(mask).size)
+        return real_whole(mask, connectivity=connectivity)
 
     def counted(mask, structure=None, output=None):
         windows.append(np.asarray(mask).size)
         return real(mask, structure=structure, output=output)
 
+    monkeypatch.setattr(segmentation, "components", counted_whole)
     monkeypatch.setattr(ndimage, "label", counted)
     volume, frame = touching_trees()
 
     comp.split_components(volume, frame, materials=MATERIALS)
 
     # One whole-volume labelling, then the straddling component's box only.
-    assert windows[0] == volume.size
-    assert all(w < volume.size for w in windows[1:]), "the rest are boxes"
+    assert whole == [volume.size]
+    assert windows and all(w < volume.size for w in windows), "the rest are boxes"
 
 
 def test_nothing_is_re_labelled_when_no_component_straddles(monkeypatch):
     from scipy import ndimage
 
-    calls = []
-    real = ndimage.label
+    from hipct_seg_debug.edit.reconnect import segmentation
+
+    whole, boxes = [], []
+    real_whole, real = segmentation.components, ndimage.label
+    monkeypatch.setattr(segmentation, "components",
+                        lambda m, connectivity=3: (
+                            whole.append(1) or real_whole(m, connectivity=connectivity)))
     monkeypatch.setattr(ndimage, "label",
                         lambda m, structure=None, output=None: (
-                            calls.append(1) or real(m, structure=structure,
+                            boxes.append(1) or real(m, structure=structure,
                                                     output=output)))
     # Left and right kept apart, so connectivity already separates them.
     volume = np.zeros((20, 20, 40), np.uint8)
@@ -293,7 +309,7 @@ def test_nothing_is_re_labelled_when_no_component_straddles(monkeypatch):
 
     parts, _stats = comp.split_components(volume, frame, materials=MATERIALS)
 
-    assert len(calls) == 1, "the single labelling, and no re-splitting"
+    assert len(whole) == 1 and not boxes, "the single labelling, and no re-splitting"
     assert [p.material for p in parts] == ["Left_Tree", "Right_Tree"]
 
 
@@ -306,3 +322,73 @@ def test_a_straddling_component_keeps_correct_sizes_and_labels():
     for part in parts:
         assert int((stats.labels == part.label).sum()) == part.voxels
     assert int((stats.labels > 0).sum()) == int((volume > 0).sum()), "no voxel lost"
+
+
+# ------------------------------------------------- the names survive a rewrite
+
+MATERIALS_TEXT = """Materials {
+    Exterior {
+        Id "0"
+    }
+    Left_Tree {
+        Color 0.0615396350622177 0 1,
+        Id "9"
+    }
+    Right_Tree {
+        Color 0.5692378282547 0 1,
+        Id "10"
+    }
+}"""
+
+
+def _two_tree_lattice(tmp_path):
+    from hipct_seg_debug import rle_write
+
+    vol = np.zeros((4, 5, 6), dtype=np.uint8)
+    vol[:, :2] = 1
+    vol[:, 3:] = 2
+    path = tmp_path / "trees.labels.am"
+    bbox = np.array([10.0, 60.0, 20.0, 60.0, 30.0, 60.0])
+    rle_write.write_lattice(path, vol, bbox, extra=MATERIALS_TEXT)
+    info = amira.read_lattice_header(path)
+    assert [m.name for m in info.regions] == ["Left_Tree", "Right_Tree"]
+    return path, vol, info
+
+
+def test_mask_export_keeps_the_materials_and_the_bbox(tmp_path):
+    """Labels alone are not enough: without the block, the per-material split that
+    keeps the two touching coronaries apart silently falls back to connectivity."""
+    from hipct_seg_debug.edit.__main__ import main
+    from hipct_seg_debug.edit.maskedit import MaskEdits
+
+    src, vol, info = _two_tree_lattice(tmp_path)
+    edits = MaskEdits(ny=vol.shape[1], nx=vol.shape[2], nz=vol.shape[0])
+    edits.set_plane(1, [2], [3], [2])
+    store = edits.save(tmp_path / "e.npz")
+
+    out = tmp_path / "out.labels.am"
+    assert main(["mask-export", "--seg", str(src), "--edits", str(store),
+                 "--out", str(out)]) == 0
+    back = amira.read_lattice_header(out)
+    assert [(m.name, m.value) for m in back.materials] == \
+        [(m.name, m.value) for m in info.materials]
+    assert np.array_equal(back.bbox, info.bbox)
+
+
+def test_geodesic_paint_writes_the_tree_it_extends(tmp_path):
+    from hipct_seg_debug.edit.maskedit import MaskSource
+    from hipct_seg_debug.edit.reconnect.geodesic.apply import paint
+
+    from .test_maskedit import FakeLattice
+
+    vol = np.zeros((3, 6, 8), dtype=np.uint8)
+    vol[1, 2, :3] = 2  # a Right_Tree stub the route starts in
+    source = MaskSource(FakeLattice(vol))
+    route = np.array([[1, 2, x] for x in range(1, 7)])
+    added, _ = paint(source, route)
+    assert added == 4
+    assert source.slice_z(1)[2, 3:7].tolist() == [2, 2, 2, 2]
+    # Nothing labelled to extend: falls back to 1, as before.
+    lone = MaskSource(FakeLattice(np.zeros((3, 6, 8), np.uint8)))
+    paint(lone, route)
+    assert set(np.unique(lone.slice_z(1))) == {0, 1}

@@ -299,6 +299,16 @@ def test_invalid_settings_are_refused(kw):
         cr.refine(g, frame, mask, **kw)
 
 
+def test_float32_bounding_box_rounding_is_isotropic_but_real_anisotropy_is_refused():
+    g, frame, mask = offset_slit()
+    # LADAF-2021-17's 32.04um labels, as their float32 bounding box spells them.
+    frame.seg_spacing = frame.seg_spacing * np.array([1., 1 + 3.8e-7, 1 + 3.1e-6])
+    cr.refine(g, frame, mask, max_iterations=1, max_samples=10)
+    frame.seg_spacing = frame.seg_spacing * np.array([1., 1., 2.])
+    with pytest.raises(ValueError, match='isotropic'):
+        cr.refine(g, frame, mask, max_iterations=1, max_samples=10)
+
+
 def test_support_is_compared_by_site_not_point_index():
     # The same two places accepted, landing on different point indices after a move.
     assert cr._support_signature([10, 20], [0, 10, 20, 30]) == cr._support_signature(
@@ -375,3 +385,62 @@ def test_shape_change_ignores_sliding_but_sees_real_movement():
     shorter = line.copy()
     shorter[-1, 0] = 80.  # an end pulled back along the curve; point 9 still reaches 90
     assert cr._shape_change(line, shorter) == pytest.approx(10.)
+
+
+class _BreakingPool:
+    """In-process stand-in for a spawn pool; the first pool breaks after `ok` results."""
+    pools = 0
+
+    def __init__(self, *args, ok=2, **kwargs):
+        type(self).pools += 1
+        self.broken_after = ok if type(self).pools == 1 else None
+        self.submitted = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def submit(self, fn, *args):
+        from concurrent.futures import Future
+        from concurrent.futures.process import BrokenProcessPool
+        future = Future()
+        if self.broken_after is not None and self.submitted >= self.broken_after:
+            future.set_exception(BrokenProcessPool("a worker died"))
+        else:
+            future.set_result(fn(*args))
+        self.submitted += 1
+        return future
+
+
+def test_section_results_resubmit_only_unfinished_segments_after_a_broken_pool(monkeypatch, capsys):
+    calls = []
+
+    def work(sid, audit=False):
+        calls.append(sid)
+        return sid, sid*10, {}, 0.
+
+    _BreakingPool.pools = 0
+    monkeypatch.setattr(cr, 'ProcessPoolExecutor', _BreakingPool)
+    monkeypatch.setattr(cr, '_section_work', work)
+    out = list(cr._section_results([5, 3, 8, 1, 2], 4, ()))
+    assert sorted(sid for sid, *_ in out) == [1, 2, 3, 5, 8]
+    assert all(result == sid*10 for sid, result, *_ in out)
+    assert sorted(calls) == [1, 2, 3, 5, 8]  # finished segments are not recomputed
+    assert _BreakingPool.pools == 2
+    assert "resubmitting 3 segment(s)" in capsys.readouterr().err
+
+
+def test_section_results_raise_when_every_retry_breaks(monkeypatch):
+    from concurrent.futures.process import BrokenProcessPool
+
+    class AlwaysBroken(_BreakingPool):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.broken_after = 0
+
+    monkeypatch.setattr(cr, 'ProcessPoolExecutor', AlwaysBroken)
+    monkeypatch.setattr(cr, '_section_work', lambda sid, audit=False: (sid, None, {}, 0.))
+    with pytest.raises(BrokenProcessPool):
+        list(cr._section_results([1, 2], 2, (), retries=1))

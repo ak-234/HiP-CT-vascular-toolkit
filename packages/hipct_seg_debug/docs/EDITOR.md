@@ -138,7 +138,22 @@ live only in memory, and the session can only warn you on the way out.
 Select the layer named **`segmentation (editable)`**, then use napari's own tools:
 `2` paint, `3` fill, `4` erase, `[` / `]` brush size, `Ctrl+Z` undo. The docked
 **paint** panel adds *Commit*, *Revert this box*, *Save edits…*, a 3-D brush
-toggle, and **Re-skeletonise painted region**.
+toggle, **Re-skeletonise painted region**, a label picker, and the
+[repair tools](#repair-tools-collapsed-lumen-and-fused-vessels).
+
+**Check the label before you paint.** A mask with a `Materials` block holds one
+value per tree -- `Left_Tree` 1 and `Right_Tree` 2 on LADAF-2021-17 -- and the brush
+writes whatever the *label* box says. `auto` takes the commonest label in each new
+box; pick a tree to pin it, or use napari's own picker (`5`, then click a voxel).
+Every label has its own colour. *Protect other labels* (on by default) keeps the
+brush to background and its own label, and the eraser to its own label, so fixing
+one tree cannot overwrite the other.
+
+> Edits painted before the label picker existed were all written as 1, which moved
+> any right-coronary correction into `Left_Tree`. **Relabel painted voxels to their
+> tree** repairs a store: each painted voxel takes the label of the tree it touches,
+> and anything painted over the other tree is dropped so the original shows through.
+> It reloads the box, which clears napari's undo history for it.
 
 Three things about it are worth knowing before you start.
 
@@ -200,6 +215,77 @@ An end with no existing centreline within the weld tolerance is **left free and
 counted**, not attached to the nearest thing available. A fragment that reaches
 nothing is a real finding about the mask, and inventing a join would hide it.
 
+### Repair tools: collapsed lumen and fused vessels
+
+Two defects that no global pass fixes, and both put false branches into every
+skeletoniser:
+
+- **A collapsed segment with a missing chunk.** The lumen has flattened to a dark slit
+  between bright walls and the mask stopped following it. The notch is usually open on
+  one side, so `repair-mask --guarded` (enclosed holes only) never proposes it, and the
+  skeleton routes around it -- a spurious side branch or loop.
+- **Two vessels fused** across a thin neck, which a skeletoniser reads as a junction.
+
+Both tools work from points you place in the **`paint seeds`** layer. Select it, press
+`2` (add points) and click along the vessel in order; a group's points are joined in
+the order placed, so a few clicks trace a run. The *seed group* box sets which group the
+next point joins, and seeds stay where they are when the paint box moves.
+
+**Fill collapsed lumen** uses one group, placed along the collapsed run. It:
+
+1. builds a capsule around the seeds (*fill radius*; `auto` is 1.5 × the mask's radius
+   beside the gap);
+2. calibrates lumen and wall intensity on *this* vessel's own mask, beside the seeds;
+3. grows from the vessel into voxels that read as its lumen, or as a thin slit between
+   walls (the flux term);
+4. refuses any piece that runs out of the capsule -- an unrelated dark region keeps
+   going, a slit is closed in by its walls -- or that would merge into the other tree,
+   join two separate pieces (unless *allow join*), or open a new tunnel.
+
+It writes the vessel's own label, or the pinned one. It decides **locally** on purpose:
+on LADAF-2021-17 a global brightness gate failed, because lumen and tissue overlap in
+intensity across the volume (`mask_repair.py`'s docstring has the measurement). Where
+this vessel shows no lumen/wall contrast either, it says so and writes nothing -- paint
+that one by hand.
+
+**Split fused vessels** needs two groups, one along each vessel. A seeded watershed on
+the distance transform (necks are thin) and the raw image (the wall between two lumens
+is bright) finds the boundary, and the cut removes a whole one-voxel layer on the
+wall's side of it, so the two pieces do not touch even diagonally. It refuses a cut
+whose thickest point is close to the vessels' own radius **and** that does not sit on
+bright wall -- that is a cut across a healthy lumen, not a neck -- unless you tick
+*force*. A successful split switches *splice* to `replace`, because `add` keeps only
+the chain through added voxels and a cut adds none.
+
+Each run is **one `Ctrl+Z`**, and the **`paint result`** layer shows what happened:
+green filled, yellow cut, red refused. The panel and the console print the reasons
+and the calibration. Then *Re-skeletonise painted region* as for any stroke.
+
+A worked pass over the edge the skeleton gets wrong:
+
+```
+python -m hipct_seg_debug --edit --paint --edits work/edits.npz ...
+```
+
+Type the edge id (say 2398) into *go to edge* in the 3D window's **layers** panel and
+press *go*: it picks the edge's midpoint and opens the slice browser there.
+(`--goto-edge 2398` on the command line goes straight to one slab instead, without
+the 3D window -- fine for painting, but *Re-skeletonise* needs the 3D window.)
+
+1. Seed group 1 along the collapsed run, beyond both ends of the notch →
+   **Fill collapsed lumen**. Green should follow the slit; red means it stopped
+   somewhere -- read the reason.
+2. **Re-skeletonise painted region** (`add`) → the side branch or loop is gone.
+3. For a fusion: seed group 1 along one vessel and group 2 along the other →
+   **Split fused vessels** → **Re-skeletonise** (`replace`).
+4. `mask-export --edits work/edits.npz --out corrected.labels.am` -- the Materials block
+   comes with it.
+
+The tools see only the open paint box, so a run longer than the box takes two passes.
+They also judge topology inside a crop around the seeds: a join or a split that only
+shows further away is not something they can see, which is one more reason to
+re-skeletonise and look.
+
 ### Getting the corrected mask out
 
 ```
@@ -209,7 +295,7 @@ python -m hipct_seg_debug.edit mask-export --edits work/edits.npz --out correcte
 
 `.am` writes a real `HxByteRLE` Amira lattice through `hipct_seg_debug/rle_write.py`
 — the encoder this package did not have until now. Label values are preserved
-rather than scaled, so the result is a drop-in replacement input for Avizo and for
+rather than scaled, the source's `Materials` block is copied across, so the result is a drop-in replacement input for Avizo and for
 your existing pipeline. Measured on LADAF-2024-28: decoding all 2.34 GB and
 re-encoding gives **37,725,961 bytes where Avizo wrote 37,709,212** (0.04% larger),
 byte-identical when read back, in 1.8 s.
@@ -947,7 +1033,8 @@ inside the box is already correct on its first voxel. Six voxels.
 | `radius_repair` | collapsed-span detection and the log-taper fill. |
 | `interpolation` | finds the points Avizo invented across a gap, records them as a per-point `.am` field, and offers the two ways to honour it: a mask for anything that measures, a split for anything that needs the topology to be honest. |
 | `maskedit` | `MaskEdits`, the sparse correction store, and `MaskSource`, which composites it onto the lattice behind the same `slice_z` everything already calls. |
-| `paint` | `PaintSession`: the writable napari layer, commit-by-diff, and the docked controls. |
+| `paint` | `PaintSession`: the writable napari layer, the label picker, the seed and result layers, commit-by-diff, and the docked controls. |
+| `mask_tools` | the seeded repairs: `fill_collapsed`, `split_fused` and `relabel_added`, on plain arrays, with no viewer. |
 | `reskeletonise` | a painted region back into centreline — pad, trace, trim to what is new, weld, splice. |
 | `_deps` | Locates `coronary_sdf`. |
 | `reconnect/` | `gaps`, `endpoints`, `tjunction`, `dpc`, `probability`, `roi`, `segmentation`. |

@@ -135,6 +135,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--goto-col", type=int, default=None, help="skip the 3D step: raw column")
     p.add_argument("--goto-um", type=float, nargs=3, default=None, metavar=("X", "Y", "Z"), help="skip the 3D step: world um")
     p.add_argument("--goto-candidate", type=int, default=None, help="skip the 3D step: candidate id")
+    p.add_argument("--goto-edge", type=int, default=None, metavar="ID",
+                   help="skip the 3D step: graph edge id, as the 3D status line shows it "
+                        "(with several --graph files, the merged numbering)")
+    p.add_argument("--goto-edge-at", type=float, default=0.5, metavar="F",
+                   help="where along --goto-edge, 0 = start, 1 = end, by arc length")
     return p
 
 
@@ -555,6 +560,13 @@ def resolve_target(args, session, cands) -> np.ndarray | None:
     """Turn any --goto-* flag into a world point in micrometres."""
     if args.goto_um is not None:
         return np.asarray(args.goto_um, dtype=np.float64)
+    if getattr(args, "goto_edge", None) is not None:
+        try:
+            xyz, _ = session.graph.edge_point(args.goto_edge,
+                                              getattr(args, "goto_edge_at", 0.5))
+        except IndexError as exc:
+            raise SystemExit(str(exc)) from None
+        return xyz
     if args.goto_candidate is not None:
         match = [c for c in cands if c.id == args.goto_candidate]
         if not match:
@@ -590,7 +602,8 @@ def inspect(session, target_um, args):
         from .edit.paint import PaintSession
 
         paint = PaintSession(session.labels, session.frame,
-                             size_vox=args.paint_box, edits_path=args.edits)
+                             size_vox=args.paint_box, edits_path=args.edits,
+                             stack=session.stack, materials=session.materials)
     viewer2d.show(build_slab(session, target_um, args), session.frame, paint=paint)
     if paint is not None:
         paint.commit()
@@ -678,7 +691,7 @@ def needs_a_dataset(args) -> str:
         return "--validate-only"
     if args.selftest:
         return "--selftest"
-    for flag in ("goto_um", "goto_candidate", "goto_slice"):
+    for flag in ("goto_um", "goto_candidate", "goto_edge", "goto_slice"):
         if getattr(args, flag, None) is not None:
             return "--" + flag.replace("_", "-")
     return ""

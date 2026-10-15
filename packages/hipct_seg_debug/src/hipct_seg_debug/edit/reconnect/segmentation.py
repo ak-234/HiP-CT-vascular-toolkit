@@ -52,9 +52,37 @@ def components(mask: np.ndarray, connectivity: int = 3) -> ComponentStats:
     vessels: an 18- or 6-connected labelling splits a diagonal capillary into
     beads.
     """
+    mask = np.asarray(mask, dtype=bool)
+    try:
+        import cc3d
+    except ImportError:  # pragma: no cover - kimimaro brings it in
+        cc3d = None
+    if cc3d is not None and mask.ndim == 3:
+        # cc3d rather than scipy: on the full LADAF-2021-17 lattice (30 G voxels) the
+        # scipy labelling, its int32 copy and a bincount that widens to int64 took 45
+        # minutes and a 240 GB temporary. Same 26/18/6-connected components; label
+        # numbers may differ, which nothing relies on -- callers order by size.
+        neighbours = {1: 6, 2: 18, 3: 26}[int(connectivity)]
+        bound = int(np.count_nonzero(mask)) + 1
+        try:
+            labels, n = cc3d.connected_components(mask, connectivity=neighbours,
+                                                  return_N=True, max_labels=bound,
+                                                  out_dtype=np.uint32)
+        except ValueError:
+            # cc3d sizes an explicit dtype against its own provisional-label estimate,
+            # not `max_labels` -- 7.5 G on the full LADAF-2021-17 lattice, so uint32 is
+            # refused. Let it choose, then narrow: the real count fits easily.
+            labels, n = cc3d.connected_components(mask, connectivity=neighbours,
+                                                  return_N=True, max_labels=bound)
+            if n >= 2**31:  # pragma: no cover - more components than voxels allow
+                raise
+            labels = labels.astype(np.uint32)
+        sizes = np.asarray(cc3d.statistics(labels)["voxel_counts"], dtype=np.int64)
+        sizes = np.pad(sizes, (0, max(n + 1 - len(sizes), 0)))[: n + 1]
+        return ComponentStats(labels=labels.view(np.int32), sizes=sizes, n=int(n))
+
     from scipy import ndimage
 
-    mask = np.asarray(mask, dtype=bool)
     structure = ndimage.generate_binary_structure(3, connectivity)
     labels, n = ndimage.label(mask, structure=structure)
     sizes = np.bincount(labels.ravel(), minlength=n + 1)

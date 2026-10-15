@@ -488,6 +488,17 @@ def build_parser() -> argparse.ArgumentParser:
                       help="components this large are protected regardless of --min-voxels")
     mask.add_argument("--close", type=int, default=0,
                       help="radius in voxels for morphological closing; 0 to skip")
+    # The guarded repair: label-preserving, per tree, every addition tested. See
+    # `mask_repair` and SKELETONISATION.md "Guarded mask repair".
+    mask.add_argument("--guarded", action="store_true",
+                      help="guarded repair: a topology-checked closing plus a slice fill "
+                           "of hollow lumens and voids that refuses loop interiors; keeps "
+                           "labels and Materials and writes an .am lattice")
+    _mask_repair_args(mask)
+    mask.add_argument("--report", default=None, help="--guarded: write every region's "
+                      "verdict and the per-tree totals here (.json)")
+    mask.add_argument("--audit-dir", default=None, help="--guarded: draw the largest "
+                      "accepted and refused regions of each kind here (needs --raw)")
 
     # ---- the Walsh-Berg workflow: run every algorithm, score, refine, re-measure --
     # See SKELETONISATION.md. These four are one chain: `skeletonise-all` proposes
@@ -503,11 +514,41 @@ def build_parser() -> argparse.ArgumentParser:
     skel_all.add_argument("--out-dir", default="skeletons",
                           help="where to write every candidate .am")
     skel_all.add_argument("--algorithms", default="lee",
-                          help="comma-separated: lee, teasar, amira, jin-mcp, jin-mcp-centroid, vmtk")
+                          help="comma-separated: lee, teasar, teasar-readme, amira, jin-mcp, "
+                               "jin-mcp-centroid, jin-mgf, geodesic-scoop, vmtk; each may carry "
+                               "parameters, e.g. 'teasar-readme[scale=4;const_um=100]', so one "
+                               "run can hold a parameter grid")
+    skel_all.add_argument("--workers", type=int, default=1,
+                          help="with --per-tree: run every (candidate, tree) pair in its own "
+                               "process, this many at once. Memory, not cores, is the limit: "
+                               "a TEASAR job holds several times its tree's bounding box")
+    skel_all.add_argument("--summary-json", default=None,
+                          help="write per-candidate counts, roughness, timing and super-metric "
+                               "terms to this JSON file")
+    skel_all.add_argument("--scoop-shell-um", type=float, default=None,
+                          help="geodesic-scoop shell width in um (default: the largest voxel side)")
+    skel_all.add_argument("--scoop-min-branch-radii", type=float, default=None,
+                          help="geodesic-scoop: prune terminal chains shorter than this many "
+                               "vessel radii (default 2)")
+    skel_all.add_argument("--mgf-mode", choices=["exact", "rim"], default=None,
+                          help="jin-mgf medial geodesic function: exact boundary geodesic "
+                               "(default) or the in-sheet rim-distance proxy")
+    skel_all.add_argument("--mgf-theta", type=float, default=None,
+                          help="jin-mgf ridge-weight divergence scale (default 0.3)")
     skel_all.add_argument("--jin-max-voxels", type=int, default=2_000_000,
-                          help="Jin MCP maximum ROI voxel count (default 2000000)")
+                          help="Jin MCP maximum ROI voxel count for the dense engine "
+                               "(default 2000000)")
+    skel_all.add_argument("--jin-engine", choices=["auto", "dense", "sparse"], default="auto",
+                          help="jin-mcp / jin-mgf engine: dense (the reference implementation, "
+                               "bounded by --jin-max-voxels), sparse (the same method on lumen "
+                               "voxels, for whole trees), or auto (dense within the bound, "
+                               "sparse beyond)")
+    skel_all.add_argument("--jin-allow-loops", action="store_true",
+                          help="let jin-mcp / jin-mgf run on a mask with loops; the output is "
+                               "still a tree, its loops cut")
     skel_all.add_argument("--jin-root-zyx", type=int, nargs=3, default=None,
-                          help="Jin extraction root in decoded ROI voxels; single component only")
+                          help="extraction root for jin-mcp, jin-mgf and geodesic-scoop, in "
+                               "decoded ROI voxels; single component only")
     skel_all.add_argument("--jin-refine-iterations", type=int, default=5,
                           help="centroid fitting iterations for the Jin hybrid")
     skel_all.add_argument("--vmtk-source-xyz", type=float, nargs=3, action='append', default=None,
@@ -523,6 +564,16 @@ def build_parser() -> argparse.ArgumentParser:
                           help="TEASAR penalty scale (Centerline Tree's 'slope')")
     skel_all.add_argument("--teasar-const-um", type=float, default=None,
                           help="TEASAR fixed penalty in um (its 'zeroVal')")
+    _mask_repair_args(skel_all, "--mask-repair")
+    skel_all.add_argument("--root-xyz", type=float, nargs=3, action="append", default=None,
+                          metavar=("X", "Y", "Z"),
+                          help="extraction root in world um (repeatable, one per tree; the "
+                               "viewer's pick readout). Jin and geodesic-scoop then start "
+                               "at the inlet instead of at the widest voxel")
+    skel_all.add_argument("--root-graph", default=None, metavar="PATH",
+                          help="take each tree's extraction root from this graph's inlet "
+                               "(its automatic root: the widest edge's free end), e.g. a "
+                               "refined DFS centreline")
     skel_all.add_argument("--no-tree-chi", action="store_true",
                           help="score chi against the segmentation's loop count rather "
                                "than the tree ideal, for a number comparable to the paper")
@@ -990,6 +1041,57 @@ def _correct_units(graph, frame, args) -> float | None:
     print(f"  skeleton rescaled onto {frame.voxel_um:.4f} um "
           f"(x{float(frame.world_scale.mean()):.6f})")
     return frame.voxel_um
+
+
+def _extraction_roots(args, frame):
+    """World positions (um) to root extraction at: ``--root-xyz``, then ``--root-graph``.
+
+    A reference graph gives, per connected component, its **widest free end**: the
+    degree-1 node whose own radius is largest, which is where a coronary tree is cut
+    from the aorta. (`roots.auto` is not used: it takes the widest *edge*'s lower-
+    coordination end, which on the LADAF-2021-17 DFS centreline is a junction 5.8 mm
+    downstream of the inlet.) Coordinates are put in this frame's units first.
+    """
+    points = [list(map(float, p)) for p in (getattr(args, "root_xyz", None) or ())]
+    path = getattr(args, "root_graph", None)
+    if path:
+        import networkx as nx
+
+        from .. import amira
+
+        g = amira.read_spatial_graph(path)
+        stamp = amira.read_voxel_stamp(path)
+        scale = 1.0
+        if frame is not None and frame.corrected and (
+                stamp is None or abs(stamp - frame.voxel_um) > 1e-6 * stamp):
+            scale = float(np.mean(frame.world_scale))
+        off, deg = g.edge_offsets, g.degree()
+        end_radius = {}
+        for e, (a, b) in enumerate(g.connectivity):
+            t = g.thickness[off[e]:off[e + 1]]
+            if len(t):
+                for v, r in ((int(a), t[0]), (int(b), t[-1])):
+                    if deg[v] == 1:
+                        end_radius[v] = max(end_radius.get(v, 0.0), float(r))
+        for comp in nx.connected_components(nx.Graph(g.connectivity.tolist())):
+            ends = [v for v in comp if v in end_radius]
+            if ends:
+                v = max(ends, key=end_radius.get)
+                points.append([float(c) * scale for c in g.vertices[v]])
+        print(f"  extraction roots from {Path(path).name}: "
+              + "; ".join(f"({p[0]:.0f}, {p[1]:.0f}, {p[2]:.0f}) um" for p in points[-3:]))
+    return points or None
+
+
+def _corrected_voxel_um(frame):
+    """The stamp for a graph extracted from the mask in `frame`, or None.
+
+    A skeleton built under a corrected `--voxel-um` is already in true micrometres.
+    Written unstamped, the viewer took it for file units and applied the correction a
+    second time: on LADAF-2021-17 (32.04 um against a 32.99 um bounding box) 1.8% of a
+    whole-tree `jin-mgf` graph then landed inside the mask it came from.
+    """
+    return frame.voxel_um if frame is not None and frame.corrected else None
 
 
 def _save(graph, out, source, voxel_um=None):
@@ -1679,7 +1781,8 @@ def _finish_reconnect(args, session, plan, *, origin: int) -> int:
             print(f"    plane {done}/{total}", end="\r")
 
         written = geodesic.write_segmentation(args.out_seg, source, frame,
-                                              progress=encoding)
+                                              progress=encoding,
+                                              extra=_materials_block(require_seg(args)))
         print(" " * 40, end="\r")
         from ..rle_write import describe as describe_write
 
@@ -2193,7 +2296,8 @@ def cmd_skeletonise(args) -> int:
         from .amira_write import write_spatial_graph
         from .adapter import to_spatial_graph
 
-        write_spatial_graph(to_spatial_graph(triple), args.out)
+        write_spatial_graph(to_spatial_graph(triple), args.out,
+                            voxel_um=_corrected_voxel_um(frame))
         print(f"\nwrote {args.out}")
     else:
         print("\n(dry run: pass --out to write the generated graph)")
@@ -2343,9 +2447,18 @@ def _decoded(args):
     decoded_bytes = math.prod(int(n) for n in sampled_shape)
     origin_zyx = (0, 0, 0)
 
+    from .skeletonisers import parse_candidate, split_candidates
+
     roi = getattr(args, "roi_zyx", None)
-    requested = {n.strip() for n in getattr(args, 'algorithms', '').split(',')}
-    bounded = bool(requested & {'jin-mcp', 'jin-mcp-centroid', 'vmtk'})
+    try:
+        requested = {parse_candidate(s)[0]
+                     for s in split_candidates(getattr(args, 'algorithms', '') or '')}
+    except ValueError:
+        requested = set()  # reported by the command itself, with the spec named
+    # Jin is bounded only on its dense engine; the sparse one is for whole trees.
+    jin_dense = getattr(args, 'jin_engine', 'dense') == 'dense'
+    bounded = bool(requested & ({'jin-mcp', 'jin-mcp-centroid', 'jin-mgf', 'vmtk'}
+                                if jin_dense else {'vmtk'}))
     limit = min(getattr(args, 'jin_max_voxels', 2_000_000), 2_000_000) if 'vmtk' in requested else getattr(args, 'jin_max_voxels', 2_000_000)
     if roi is None and bounded and decoded_bytes > limit:
         raise ValueError('Experimental skeleton input exceeds voxel limit; specify --roi-zyx before decoding')
@@ -2434,18 +2547,62 @@ def _scoring_context(args, volume, frame):
     return image, refs
 
 
+def _candidate_summary(name, algorithm, params, cand, metric, dest) -> dict:
+    """One ``--summary-json`` row: what was run, what it produced, how it scored."""
+    from .graphmodel import EditableGraph
+    from .skeleton_optimise import roughness
+
+    t = cand.triple
+    degrees = [int(n[3]) for n in t.nodes.values()]
+    terminals = sum(d == 1 for d in degrees)
+    row = dict(candidate=name, algorithm=algorithm, status="written", file=str(dest),
+               params={k: v for k, v in params.items() if k != "report_dir"},
+               seconds=round(float(cand.seconds), 3), segments=len(t.segments),
+               nodes=len(t.nodes), points=len(t.points), terminals=terminals,
+               junctions=sum(d >= 3 for d in degrees),
+               terminal_fraction=terminals / max(len(t.nodes), 1),
+               trees=cand.trees, detail=cand.detail)
+    if t.segments:
+        r = roughness(EditableGraph(t))
+        row["roughness"] = dict(reversing=r.reversing, median_step_um=r.median_step_um,
+                                max_step_um=r.max_step_um, length_mm=r.length_mm)
+    if metric is not None:
+        row["super_metric"] = dict(
+            total=metric.total, volume=metric.volume, components=metric.components,
+            euler=metric.euler, cl=metric.cl, bifurcation=metric.bifurcation,
+            cl_sensitivity=metric.cl_sensitivity, bifurcation_dice=metric.bifurcation_dice,
+            graph_components=metric.graph_components,
+            graph_euler_classical=metric.graph_euler_classical)
+    return row
+
+
 def cmd_skeletonise_all(args) -> int:
+    """Run and score every candidate; the mask is decoded once and never edited, so the
+    component split and each tree's scoring context are computed once too."""
+    from . import components as comp
+    from . import supermetric as sm
+
+    with comp.reuse_splits(), sm.reuse_tree_context():
+        return _skeletonise_all(args)
+
+
+def _skeletonise_all(args) -> int:
     from . import skeletonisers as sk
     from . import supermetric as sm
     from .adapter import to_spatial_graph
     from .amira_write import write_spatial_graph
     from .graphmodel import EditableGraph
 
-    names = [n.strip() for n in args.algorithms.split(",") if n.strip()]
-    unknown = [n for n in names if n not in sk.ALGORITHMS]
+    try:
+        specs = [sk.parse_candidate(s) for s in sk.split_candidates(args.algorithms)]
+    except ValueError as exc:
+        print(exc)
+        return 2
+    unknown = [n for n, _ in specs if n not in sk.ALGORITHMS]
     if unknown:
         print(f"unknown algorithm(s) {unknown}; choose from {list(sk.ALGORITHMS)}")
         return 2
+    names = list(dict.fromkeys(n for n, _ in specs))
 
     refusal = _check_per_tree(args)
     if refusal:
@@ -2457,6 +2614,12 @@ def cmd_skeletonise_all(args) -> int:
     # and the announcement should appear once rather than three times.
     materials = _seg_materials(args)
     _report_materials(materials)
+    roots_um = _extraction_roots(args, frame)
+    repair = None
+    if args.mask_repair:
+        # Before scoring and before any cached split: every candidate, and the score,
+        # then see the repaired mask.
+        repair, _sampler = _guarded_repair(args, volume, frame, materials)
     if args.no_score:
         image = refs = None
         print("\nscoring disabled (--no-score)")
@@ -2479,11 +2642,34 @@ def cmd_skeletonise_all(args) -> int:
         if args.per_tree:
             raise ValueError('VMTK baseline requires a single connected ROI and matching explicit seeds')
         params['vmtk'].update(source_points=args.vmtk_source_xyz, target_points=args.vmtk_target_xyz)
-    if "teasar" in params:
+    for name in ("teasar", "teasar-readme"):
+        if name not in params:
+            continue
         if args.teasar_scale is not None:
-            params["teasar"]["scale"] = args.teasar_scale
+            params[name]["scale"] = args.teasar_scale
         if args.teasar_const_um is not None:
-            params["teasar"]["const_um"] = args.teasar_const_um
+            params[name]["const_um"] = args.teasar_const_um
+    for name in ("jin-mgf", "geodesic-scoop"):
+        if name in params and args.jin_root_zyx is not None:
+            if args.per_tree:
+                raise ValueError('--jin-root-zyx is relative to one ROI; cannot combine with --per-tree')
+            params[name]["root_zyx"] = args.jin_root_zyx
+    for name in ("jin-mcp", "jin-mcp-centroid", "jin-mgf"):
+        if name in params:
+            params[name]["engine"] = args.jin_engine
+            if args.jin_allow_loops:
+                params[name]["allow_loops"] = True
+    if "jin-mgf" in params:
+        params["jin-mgf"]["max_voxels"] = args.jin_max_voxels
+        if args.mgf_mode is not None:
+            params["jin-mgf"]["mgf_mode"] = args.mgf_mode
+        if args.mgf_theta is not None:
+            params["jin-mgf"]["theta"] = args.mgf_theta
+    if "geodesic-scoop" in params:
+        if args.scoop_shell_um is not None:
+            params["geodesic-scoop"]["shell_um"] = args.scoop_shell_um
+        if args.scoop_min_branch_radii is not None:
+            params["geodesic-scoop"]["min_branch_radii"] = args.scoop_min_branch_radii
     if "amira" in params:
         params["amira"]["graph"] = require_graph(args.amira_graph or default_graph())
 
@@ -2492,23 +2678,82 @@ def cmd_skeletonise_all(args) -> int:
     # Every candidate that reached disk, scored or not: `--no-score` skips `scored`
     # entirely, and `--pick-roots` still needs something to open a window on.
     written: list[tuple] = []
+    summary: list[dict] = []
     produced = 0
-    for name in names:
+
+    # --workers: every (candidate, tree) pair in its own process, before the loop
+    # below reports, scores and writes them in the order they were asked for.
+    precomputed: dict = {}
+    if args.workers > 1 and args.per_tree:
+        many = [(sk.candidate_label(alg, extra), alg, {**params[alg], **extra})
+                for alg, extra in specs if alg != "amira"]
+        print(f"\nrunning {len(many)} candidate(s) per tree on {args.workers} worker(s)...")
+        precomputed = sk.skeletonise_many(
+            many, volume, frame, workers=args.workers,
+            scratch_dir=Path(args.out_dir) / ".tree-crops",
+            min_component_voxels=args.min_component_voxels, max_trees=args.max_trees,
+            verbose=True, materials=materials, roots_um=roots_um,
+        )
+
+    def write_summary():
+        # Rewritten after every candidate, not once at the end: on a whole-heart
+        # lattice one candidate can take hours, and a crash should cost only the one
+        # in flight.
+        if not args.summary_json:
+            return
+        import json
+
+        Path(args.summary_json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.summary_json).write_text(json.dumps(
+            dict(segmentation=str(path), roi_zyx=args.roi_zyx, per_tree=bool(args.per_tree),
+                 scored=not args.no_score,
+                 mask_repair=None if repair is None else dict(
+                     settings=repair.settings, trees=repair.trees,
+                     summary={f"{k}/{w}": dict(regions=n, voxels=v)
+                              for (k, w), (n, v) in repair.reasons().items()}),
+                 candidates=summary), indent=2, default=str),
+            encoding="utf-8")
+    for algorithm, extra in specs:
+        # A grid point is named for its parameters, so its .am does not overwrite the
+        # same algorithm's other points.
+        name = sk.candidate_label(algorithm, extra)
+        kwargs = {**params[algorithm], **extra}
         print(f"\n-- {name}")
+        if isinstance(precomputed.get(name), BaseException):
+            # A worker's failure is this candidate's alone: the others are already
+            # computed, and raising here threw them away unwritten.
+            exc = precomputed[name]
+            if isinstance(exc, (ImportError, ValueError)):
+                print(f"  skipped: {exc}")
+                summary.append(dict(candidate=name, algorithm=algorithm, status="skipped",
+                                    error=str(exc)))
+            else:
+                print(f"  failed: {type(exc).__name__}: {exc}")
+                summary.append(dict(candidate=name, algorithm=algorithm, status="failed",
+                                    error=f"{type(exc).__name__}: {exc}"))
+            write_summary()
+            continue
         try:
-            if args.per_tree:
+            if name in precomputed:
+                cand = precomputed[name]
+            elif args.per_tree:
                 cand = sk.skeletonise_per_component(
-                    name, volume, frame,
+                    algorithm, volume, frame,
                     min_component_voxels=args.min_component_voxels,
                     max_trees=args.max_trees, verbose=True,
-                    materials=materials, **params[name],
+                    materials=materials, roots_um=roots_um, **kwargs,
                 )
             else:
-                cand = sk.skeletonise(name, volume, frame, **params[name])
+                cand = sk.skeletonise(algorithm, volume, frame, **kwargs)
         except (ImportError, ValueError) as exc:
             print(f"  skipped: {exc}")
+            summary.append(dict(candidate=name, algorithm=algorithm, status="skipped",
+                                error=str(exc)))
+            write_summary()
             continue
+        cand.name = name
         print(" ", cand.describe())
+        metric = None
         if not args.no_score:
             graph = EditableGraph(cand.triple)
             metric = sm.super_metric(
@@ -2528,10 +2773,16 @@ def cmd_skeletonise_all(args) -> int:
         out.mkdir(parents=True, exist_ok=True)
         dest = out / f"{name}.am"
         write_spatial_graph(to_spatial_graph(cand.triple), dest,
-                            parameters_from=params.get("amira", {}).get("graph"))
+                            parameters_from=params.get("amira", {}).get("graph"),
+                            voxel_um=_corrected_voxel_um(frame))
         print(f"  wrote {dest}")
         written.append((name, cand))
+        summary.append(_candidate_summary(name, algorithm, kwargs, cand, metric, dest))
+        write_summary()
         produced += 1
+
+    if args.summary_json:
+        print(f"\nsummary written to {Path(args.summary_json).resolve()}")
 
     if not produced:
         print("\nno candidate produced a skeleton")
@@ -2927,6 +3178,11 @@ def cmd_refine_centreline(args) -> int:
 def cmd_simplify_skeleton(args) -> int:
     from .centreline_cli import run_simplify
     return run_simplify(args)
+
+
+def cmd_fair_centreline(args) -> int:
+    from .centreline_cli import run_fair
+    return run_fair(args)
 
 
 def cmd_crop(args) -> int:
@@ -3392,10 +3648,113 @@ def _print_scoped_scores(args, graph, frame, volume, scope: str):
     return scores, total
 
 
+def _mask_repair_args(parser, flag=None):
+    """The guarded repair's settings, shared by `repair-mask` and `skeletonise-all`."""
+    from .mask_repair import CLOSE_RADIUS, MAX_HOLE_UM
+
+    if flag:
+        parser.add_argument(flag, action="store_true",
+                            help="guarded mask repair before skeletonising (needs --raw); "
+                                 "see repair-mask --guarded")
+    parser.add_argument("--raw", default=None,
+                        help="raw slice directory for the guarded repair's audit and "
+                             "recorded intensities")
+    parser.add_argument("--raw-pattern", default="*", help="glob for the raw slices")
+    parser.add_argument("--close-radius", type=int, default=CLOSE_RADIUS,
+                        help="guarded repair: closing radius in voxels; 0 for fill only")
+    parser.add_argument("--max-hole-um", type=float, default=MAX_HOLE_UM,
+                        help="guarded repair: largest 2D hole filled, as an equivalent "
+                             "radius in um")
+
+
+def _guarded_repair(args, volume, frame, materials):
+    """Run `mask_repair.repair_volume` on `volume` in place; returns the report.
+
+    `--raw` is required. It does not decide anything -- the guards are geometric, see
+    `mask_repair` -- but the audit gallery and the recorded intensities are how a
+    repair is checked by eye, and a repair nobody can check should not run quietly.
+    """
+    from . import mask_repair as mr
+
+    if not getattr(args, "raw", None):
+        raise SystemExit("guarded mask repair needs --raw: the audit of what it filled "
+                         "is drawn on the raw image")
+    if getattr(args, "voxel_um", None) is None:
+        # Without it the lattice-only frame guesses a 2x binning, which is for reporting
+        # and would sample the wrong raw voxels -- the viewer refuses for the same reason.
+        raise SystemExit("guarded mask repair needs --voxel-um, the raw voxel size: it is "
+                         "what maps the segmentation onto --raw")
+    if max(int(getattr(args, "stride", 1)), 1) != 1:
+        raise SystemExit("guarded mask repair runs at --stride 1: its radii are in voxels")
+    from ..tiffstack import TiffStack
+
+    sampler = mr.StackSampler(TiffStack(args.raw, pattern=args.raw_pattern), frame)
+    print("\nguarded mask repair...")
+    report = mr.repair_volume(volume, frame, sampler=sampler, close_radius=args.close_radius,
+                              max_hole_um=args.max_hole_um, materials=materials,
+                              verbose=True)
+    print(report.describe())
+    return report, sampler
+
+
+def _materials_block(path) -> str:
+    """The source header's ``Materials { ... }`` text, verbatim, or ''."""
+    import re
+
+    from .. import amira
+
+    with open(path, "rb") as fh:
+        head = fh.read(1 << 22).decode("latin-1", errors="replace")
+    head = head.split("# Data section follows")[0]
+    m = re.search(r"\bMaterials\s*\{", head)
+    if m is None:
+        return ""
+    close = amira._matching_brace(head, m.end() - 1)
+    if close < 0:
+        return ""
+    lines = head[m.start():close + 1].splitlines()
+    indent = min(len(ln) - len(ln.lstrip()) for ln in lines[1:] if ln.strip()) - 4
+    return "\n".join([lines[0].strip()] + [ln[max(indent, 0):] for ln in lines[1:]])
+
+
+def _cmd_repair_mask_guarded(args) -> int:
+    import json
+
+    from .. import amira, rle_write
+    from . import mask_repair as mr
+    from .lattice import decode_volume
+
+    labels, frame, path = _open_lattice(args)
+    print(f"{Path(path).name}: decoding (stride 1)...")
+    volume = decode_volume(labels, stride=1)
+    before = volume.copy() if args.audit_dir else None
+    materials = _seg_materials(args)
+    report, sampler = _guarded_repair(args, volume, frame, materials)
+    if args.report:
+        Path(args.report).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.report).write_text(json.dumps(report.as_dict(), indent=1, default=str),
+                                     encoding="utf-8")
+        print(f"\nreport written to {args.report}")
+    if args.audit_dir:
+        written = mr.audit_gallery(report, before, volume, sampler, args.audit_dir)
+        print(f"audit: {len(written)} gallery page(s) in {args.audit_dir}")
+        del before
+    if args.out:
+        bbox = np.asarray(amira.read_lattice_header(path).bbox, dtype=np.float64)
+        result = rle_write.write_lattice(args.out, volume, bbox, field=args.labels_field,
+                                         extra=_materials_block(path))
+        print("\n" + rle_write.describe(result))
+    else:
+        print("\n(dry run: pass --out to write the repaired lattice)")
+    return 0
+
+
 def cmd_repair_mask(args) -> int:
     from .lattice import decode_volume
     from .reconnect import segmentation as seg
 
+    if args.guarded:
+        return _cmd_repair_mask_guarded(args)
     labels, frame, path = _open_lattice(args)
     stride = max(int(args.stride), 1)
     print(f"{Path(path).name}: decoding (stride {stride})...")
@@ -3457,18 +3816,34 @@ def cmd_mask_export(args) -> int:
 
     info = amira.read_lattice_header(path)
     nz, ny, nx = mask.shape
-    # The bbox spans voxel *centres*, and a strided export has a coarser spacing,
-    # so the far face moves in. Getting this wrong shifts the whole volume.
-    spacing = np.asarray(info.spacing, dtype=np.float64) * stride
-    origin = np.asarray(info.origin, dtype=np.float64)
-    bbox = np.empty(6, dtype=np.float64)
-    bbox[0::2] = origin
-    bbox[1::2] = origin + (np.array([nx, ny, nz]) - 1) * spacing
+    if stride == 1:
+        # The source's own numbers, not a re-derivation that can drift in the last bit.
+        bbox = np.asarray(info.bbox, dtype=np.float64)
+    else:
+        # The bbox spans voxel *centres*, and a strided export has a coarser spacing,
+        # so the far face moves in. Getting this wrong shifts the whole volume.
+        spacing = np.asarray(info.spacing, dtype=np.float64) * stride
+        origin = np.asarray(info.origin, dtype=np.float64)
+        bbox = np.empty(6, dtype=np.float64)
+        bbox[0::2] = origin
+        bbox[1::2] = origin + (np.array([nx, ny, nz]) - 1) * spacing
+
+    # Without the Materials block the labels survive but their names do not, and
+    # everything that splits by material (skeletonise --per-tree, repair-mask
+    # --guarded) silently falls back to connectivity -- which at 32 um joins the
+    # left and right coronaries into one tree.
+    extra = _materials_block(path)
+    if info.materials:
+        declared = {m.value for m in info.materials}
+        stray = [int(v) for v in values if int(v) not in declared]
+        if stray:
+            print(f"  warning: value(s) {stray} are not in the Materials block; "
+                  "Avizo will show them unnamed")
 
     def report_progress(done, total, elapsed):
         print(f"    encoding {done}/{total} planes ({elapsed:.1f}s)", end="\r")
 
-    result = rle_write.write_lattice(out, mask, bbox, field=args.field,
+    result = rle_write.write_lattice(out, mask, bbox, field=args.field, extra=extra,
                                      progress=report_progress)
     print(" " * 40, end="\r")
     print("\n" + rle_write.describe(result))
@@ -3494,6 +3869,7 @@ def main(argv=None) -> int:
         "refine-centreline": cmd_refine_centreline,
         "prepare-reconstruction": cmd_refine_centreline,
         "simplify-skeleton": cmd_simplify_skeleton,
+        "fair-centreline": cmd_fair_centreline,
         "segment-diagnosis": cmd_segment_diagnosis,
         "junction-mask": cmd_junction_mask,
         "reformat-radius": cmd_reformat_radius,

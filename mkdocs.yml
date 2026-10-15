@@ -27,6 +27,8 @@ nav:
       - Junction refinement: packages/hipct_seg_debug/docs/JUNCTION_REFINEMENT.md
       - Centreline qualification (LADAF-2021-17): packages/hipct_seg_debug/docs/CENTRELINE_QUALIFICATION_2021_17.md
       - Jin minimum-cost-path skeletonisation: packages/hipct_seg_debug/docs/JIN_MCP.md
+      - jin-mgf workflow, end to end: packages/hipct_seg_debug/docs/JIN_MGF_WORKFLOW.md
+      - Skeletonisers against TEASAR: packages/hipct_seg_debug/docs/SKELETON_BENCHMARK.md
       - Geodesic reconnection: packages/hipct_seg_debug/docs/GEODESIC_RECONNECTION.md
       - Wavefront reconnection: packages/hipct_seg_debug/docs/WAVEFRONT_RECONNECTION.md
       - Reformat: packages/hipct_seg_debug/docs/REFORMAT.md

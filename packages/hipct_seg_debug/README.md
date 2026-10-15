@@ -27,6 +27,11 @@ exists to put the raw image back underneath everything else.
 > how do I know this one is right?" — and records where `skeleton_analysis`
 > diverges from the paper it is a port of.
 >
+> **Running `jin-mgf` from mask to smooth centreline?**
+> [JIN_MGF_WORKFLOW.md](docs/JIN_MGF_WORKFLOW.md) gives the command-line and GUI route
+> for every stage: hand correction of the mask, guarded repair, skeletonisation,
+> spurious-branch pruning, junction simplification and smoothing.
+>
 > You do not have to type them. The 3D window carries a **control** dock that runs
 > every command as a form, chains the workflows, and loads a different dataset
 > without restarting — [CLI.md Part 7](docs/CLI.md#part-7--the-control-panel).
@@ -849,7 +854,7 @@ src/hipct_seg_debug/     the package -- `pip install -e .` puts this on the impo
     edit/reconnect/      the five reconnection proposers (gaps, CFC, DPC, geodesic, wavefront)
 tests/                   the pytest suite; `python -m pytest` runs it
 docs/                    CLI.md, EDITOR.md, REFORMAT.md, SKELETONISATION.md, GEODESIC_RECONNECTION.md,
-                         WAVEFRONT_RECONNECTION.md
+                         WAVEFRONT_RECONNECTION.md, JIN_MCP.md, JIN_MGF_WORKFLOW.md
 environment-cfc.yml      the separate Python 3.9 environment the Cascade Forest steps need
 ```
 

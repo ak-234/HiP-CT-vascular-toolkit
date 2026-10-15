@@ -20,7 +20,7 @@ from hipct_seg_debug.workflows import Step, Workflow, WorkflowRun, resolve
 SPECS = {s.name: s for s in cliform.describe_parser(edit_parser())}
 CONTEXT = {
     "run": "R", "graph": "G.am", "seg": "S.am", "edits": "E.npz",
-    "raw": "RAW", "cfc_model": "MODEL", "cfc_python": "python39.exe",
+    "raw": "RAW", "voxel_um": "32.04", "cfc_model": "MODEL", "cfc_python": "python39.exe",
 }
 
 
@@ -171,6 +171,25 @@ def test_a_feed_takes_the_previous_steps_value():
 def test_a_feed_with_no_previous_step_is_refused():
     with pytest.raises(ValueError, match="does not exist"):
         resolve(Step("connect", {}, feeds={"graph": "out"}), CONTEXT, None)
+
+
+def test_a_placeholder_the_session_cannot_fill_is_not_passed():
+    """No `--voxel-um` in the session must omit the flag, not hand argparse ""."""
+    step = Step("repair-mask", {"voxel_um": "{voxel_um}", "edits": "{edits}"})
+    assert resolve(step, {**CONTEXT, "voxel_um": "", "edits": ""}, None) == {}
+
+
+def test_the_jin_mgf_chain_works_on_the_repaired_mask():
+    """Every step after the guarded repair must read its output, not the session's mask."""
+    steps = [s for s in workflows.WORKFLOW_BY_KEY["jin-mgf"].steps if not s.is_pause]
+    assert [s.command for s in steps] == [
+        "repair-mask", "skeletonise-all", "simplify-skeleton", "fair-centreline"]
+    repaired = steps[0].values["out"]
+    assert steps[0].values["guarded"] and steps[0].values["seg"] == "{seg}"
+    assert all(s.values["seg"] == repaired for s in steps[1:])
+    assert steps[1].values["algorithms"] == "jin-mgf"
+    assert steps[2].values["graph"] == steps[1].values["out_dir"] + "/jin-mgf.am"
+    assert steps[2].values["apply"]
 
 
 def test_non_string_values_pass_through_untouched():

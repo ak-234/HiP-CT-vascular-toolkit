@@ -70,6 +70,56 @@ def add_parsers(sub, common, seg_common):
                         "diameter (paper, automatic)")
     p.add_argument("--apply", action="store_true", help="edit the graph and write --out")
     p.add_argument("--report-json", default=None)
+    from .centreline_fair import (EMERGENCE_RADII, MAX_DEFLECTION_DEG, MAX_MOVE_RADII,
+                                  MIN_SMOOTH_VOXELS, SMOOTH_RADII, THROUGH_RADII)
+    p = sub.add_parser("fair-centreline", parents=[common, seg_common],
+                       help="smooth each vessel as one curve through its junctions, "
+                            "kept inside the segmentation; radii unchanged")
+    p.add_argument("--smooth-radii", type=float, default=SMOOTH_RADII,
+                   help=f"smoothing length in local radii (default {SMOOTH_RADII})")
+    p.add_argument("--min-smooth-voxels", type=float, default=MIN_SMOOTH_VOXELS,
+                   help=f"smoothing length floor in voxels (default {MIN_SMOOTH_VOXELS})")
+    p.add_argument("--emergence-radii", type=float, default=EMERGENCE_RADII,
+                   help="a branch's points within this many parent radii of its junction "
+                        f"are not fitted (default {EMERGENCE_RADII})")
+    p.add_argument("--through-radii", type=float, default=THROUGH_RADII,
+                   help="a vessel's own points within this many of its radii of a junction "
+                        f"it passes through are not fitted (default {THROUGH_RADII})")
+    p.add_argument("--max-deflection-deg", type=float, default=MAX_DEFLECTION_DEG,
+                   help="a vessel continues through a junction only into a branch "
+                        f"turning less than this (default {MAX_DEFLECTION_DEG:g})")
+    p.add_argument("--max-move-radii", type=float, default=MAX_MOVE_RADII,
+                   help=f"largest point move in local radii (default {MAX_MOVE_RADII})")
+    p.add_argument("--root-node", dest="root_nodes", type=int, action="append", default=[],
+                   help="start vessels here; repeat for several trees")
+    p.add_argument("--no-contract", action="store_true",
+                   help="keep degree-2 nodes instead of rejoining their segments")
+    p.add_argument("--report-json", default=None)
+
+
+def run_fair(args):
+    from .__main__ import _correct_units, _load, _open_lattice, _save
+    from .centreline_fair import fair, frame_inside
+
+    if not args.out:
+        raise ValueError("fair-centreline needs --out")
+    if Path(args.out).resolve() in {Path(p).resolve() for p in args.graph}:
+        raise ValueError("write a separate output; the input graph must be preserved")
+    graph = _load(args.graph)
+    labels, frame, _ = _open_lattice(args)
+    stamp = _correct_units(graph, frame, args)
+    report = fair(graph, spacing_um=float(frame.seg_spacing[0]), roots=args.root_nodes,
+                  inside=frame_inside(labels, frame), smooth_radii=args.smooth_radii,
+                  min_smooth_voxels=args.min_smooth_voxels,
+                  emergence_radii=args.emergence_radii, through_radii=args.through_radii,
+                  max_deflection_deg=args.max_deflection_deg,
+                  max_move_radii=args.max_move_radii, contract=not args.no_contract)
+    print(report.describe())
+    _save(graph, args.out, args.graph, voxel_um=stamp)
+    report_path = args.report_json or str(args.out) + '.report.json'
+    Path(report_path).write_text(json.dumps(report.to_dict(), indent=2, default=float),
+                                 encoding='utf-8')
+    return 0
 
 
 def run_simplify(args):
@@ -143,6 +193,35 @@ def run_simplify(args):
     return 0
 
 
+def _section_heartbeat(total: int, every: int = 25):
+    """A `section_progress` callback printing one line per `every` segments measured.
+
+    Each iteration starts by remeasuring every segment's sections, and on a whole tree
+    that phase runs for tens of minutes. Without this it printed nothing at all, which
+    reads as a hang; one line per segment would be 725 lines an iteration.
+    """
+    import time
+
+    state = {"iteration": None, "done": 0, "cached": 0, "start": time.monotonic()}
+
+    def report(row):
+        if "stage" in row:  # e.g. the centring audit: pass it through as is
+            print(json.dumps(row), flush=True)
+            return
+        if row.get("iteration") != state["iteration"]:
+            state.update(iteration=row.get("iteration"), done=0, cached=0,
+                         start=time.monotonic())
+        state["done"] += 1
+        state["cached"] += bool(row.get("cached"))
+        if state["done"] % every == 0 or state["done"] == total:
+            print(json.dumps(dict(stage="sections", iteration=state["iteration"],
+                                  measured=state["done"], of=total, cached=state["cached"],
+                                  elapsed_s=round(time.monotonic() - state["start"], 1))),
+                  flush=True)
+
+    return report
+
+
 def run(args):
     from .__main__ import _correct_units, _load, _open_lattice, _save
     from . import radius_perimeter as rp
@@ -157,6 +236,7 @@ def run(args):
     before = {sid: graph.coords(sid).copy() for sid in graph.segment_ids()}
     if args.command == "refine-centreline":
         from .centreline_refine import refine
+        total = len(args.segments) if args.segments else len(graph.segment_ids())
         report = refine(
             graph, frame, labels, method=args.method, sids=args.segments,
             fixed_nodes=set(args.fixed_nodes) | roots, root_nodes=roots,
@@ -166,6 +246,7 @@ def run(args):
             reuse_sections=not getattr(args, 'no_section_cache', False),
             progress=lambda row: print(json.dumps(row), flush=True),
             path_progress=lambda row: print(json.dumps(dict(stage='path_fit', **row)), flush=True),
+            section_progress=_section_heartbeat(total),
         ).to_dict()
         if not args.geometry_only:
             result = rp.measure_radii(graph, frame, labels, workers=args.workers,
